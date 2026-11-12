@@ -8,7 +8,7 @@ import { Marca } from '../marca';
   imports: [Marca],
   template: `
     <form class="acceso" (submit)="enviar($event)">
-      <p class="acceso-marca"><app-marca />AVIA</p>
+      <p class="acceso-marca"><app-marca />SiVI</p>
       <p class="pista">Ingresa el codigo</p>
       <div class="digitos">
         @for (hueco of huecos; track hueco) {
@@ -25,6 +25,7 @@ import { Marca } from '../marca';
           />
         }
       </div>
+      <div class="acceso-campos">
       <label class="nombre-bloque">
         <span>Escribe tu nombre completo</span>
         <input
@@ -36,6 +37,22 @@ import { Marca } from '../marca';
           (input)="nombre.set(texto($event))"
         />
       </label>
+      <label class="nombre-bloque">
+        <span>Nombre del profesor</span>
+        <input class="nombre-linea" name="profesor" required minlength="2" maxlength="100"
+          [value]="profesor()" (input)="profesor.set(texto($event))" />
+      </label>
+      <label class="nombre-bloque">
+        <span>Semestre</span>
+        <input class="nombre-linea" name="semestre" required maxlength="40"
+          [value]="semestre()" (input)="semestre.set(texto($event))" />
+      </label>
+      <label class="nombre-bloque">
+        <span>Materia</span>
+        <input class="nombre-linea" name="materia" required minlength="2" maxlength="100"
+          [value]="materia()" (input)="materia.set(texto($event))" />
+      </label>
+      </div>
       <p class="acceso-nota">Después se enciende la cámara y el micrófono.</p>
       @if (error()) {
         <p class="fallo">{{ error() }}</p>
@@ -51,6 +68,9 @@ export class Entrar implements OnDestroy {
   readonly huecos = [0, 1, 2, 3, 4, 5, 6, 7];
   readonly digitos = signal(['', '', '', '', '', '', '', '']);
   readonly nombre = signal('');
+  readonly profesor = signal('');
+  readonly semestre = signal('');
+  readonly materia = signal('');
   readonly error = signal('');
   readonly enviando = signal(false);
 
@@ -111,7 +131,10 @@ export class Entrar implements OnDestroy {
     try {
       const data = await this.api.request<{ id: string }>('/api/intentos', {
         method: 'POST',
-        body: { nombre: this.nombre(), codigo },
+        body: {
+          nombre: this.nombre(), codigo, profesor: this.profesor(),
+          semestre: this.semestre(), materia: this.materia(),
+        },
       });
       sessionStorage.setItem('encuadro.intento', data.id);
       await this.router.navigateByUrl('/sala');

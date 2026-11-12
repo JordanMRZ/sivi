@@ -2,3 +2,7 @@ data/
 __pycache__/
 *.pyc
 client/node_modules/
+.firebase/
+firebase-debug.log*
+/web/
+/client/public/sivi-config.json

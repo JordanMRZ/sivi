@@ -23,12 +23,12 @@ type Fase = 'carga' | 'camara' | 'examen' | 'fin' | 'error';
         <p class="kicker">Respuesta</p>
         <h1>{{ fase() === 'fin' ? 'Listo' : 'No se pudo abrir' }}</h1>
         <p class="lede">{{ finTexto() }}</p>
-        <a class="btn line" routerLink="/entrar" replaceUrl>Usar otro nombre</a>
+        <a class="btn line" routerLink="/entrar" replaceUrl>Volver al acceso</a>
       </app-marco>
     }
     @if (fase() === 'camara') {
       <section class="preparar" [class.encoge]="encogiendo()">
-        <p class="prep-marca"><app-marca />AVIA</p>
+        <p class="prep-marca"><app-marca />SiVI</p>
         <div class="visor-prev">
           <video id="preview" autoplay muted playsinline (loadedmetadata)="ajustarVisor($event)"></video>
         </div>
@@ -76,7 +76,24 @@ type Fase = 'carga' | 'camara' | 'examen' | 'fin' | 'error';
           @if (cerrado()) {
             <div class="cierre">
               <h2>{{ mensaje() }}</h2>
-              <p>Ya puedes cerrar esta ventana.</p>
+              @if (errorSubida()) {
+                <p role="alert">{{ errorSubida() }}</p>
+              }
+              @if (finalizando()) {
+                <div class="guardando-grabacion" role="status">
+                  <span class="guardando-indicador" aria-hidden="true"></span>
+                  <strong>¡Espera! No cierres esta ventana.</strong>
+                  <p>Estamos guardando tu grabación.</p>
+                  <ul class="plazos-grabacion">
+                    <li>Una vez enviado el video, el docente tendrá <strong>8 días hábiles</strong> para dar una calificación.</li>
+                    <li>La grabación se eliminará después de <strong>20 días calendario</strong>.</li>
+                  </ul>
+                </div>
+              } @else if (errorSubida() && chunkIndex === 0) {
+                <a class="btn line" routerLink="/entrar" replaceUrl>Volver al acceso</a>
+              } @else {
+                <p>Ya puedes cerrar esta ventana.</p>
+              }
             </div>
           } @else if (pregunta()) {
             <div class="enunciado" [class.varios]="parrafos().length > 1">
@@ -116,17 +133,20 @@ export class Sala implements OnDestroy {
   readonly tiempo = signal('--:--');
   readonly cerrado = signal(false);
   readonly mensaje = signal('');
+  readonly errorSubida = signal('');
+  readonly finalizando = signal(false);
   readonly barras = BARRAS;
 
   private id = '';
   private stream: MediaStream | null = null;
   private recorder: MediaRecorder | null = null;
-  private chunkIndex = 0;
+  protected chunkIndex = 0;
   private cola: Promise<void> = Promise.resolve();
   private finEnCurso = false;
   private preguntaVisible = false;
   private inicio: number | null = null;
   private minutos: number | null = null;
+  private finReloj = 0;
   private timer = 0;
   private hideTimer = 0;
   private pollSala = 0;
@@ -162,7 +182,7 @@ export class Sala implements OnDestroy {
     window.removeEventListener('pageshow', this.alVolver);
     this.limpiar();
     document.body.classList.remove('en-examen', 'fondo-blanco');
-    this.title.setTitle('AVIA');
+    this.title.setTitle('SiVI');
   }
 
   async empezar() {
@@ -181,7 +201,7 @@ export class Sala implements OnDestroy {
     if (preview) preview.srcObject = null;
     this.fase.set('examen');
     document.body.classList.add('en-examen');
-    this.title.setTitle('Examen');
+    this.title.setTitle('Examen · SiVI');
     window.setTimeout(() => this.comenzarGrabacion(), 40);
   }
 
@@ -189,11 +209,11 @@ export class Sala implements OnDestroy {
     if (this.finEnCurso) return;
     if (this.muestras >= 45 && this.muestrasVoz / this.muestras < 0.06) this.avisar('silencio');
     this.finEnCurso = true;
+    this.finalizando.set(true);
     this.preguntaVisible = false;
     window.clearInterval(this.timer);
     window.clearInterval(this.pollSala);
     window.clearTimeout(this.hideTimer);
-    window.onbeforeunload = null;
     this.pregunta.set('');
     this.cerrado.set(true);
     this.mensaje.set(mensajeCorte(tipo));
@@ -214,11 +234,6 @@ export class Sala implements OnDestroy {
       }
       recorder.addEventListener('stop', () => resolve(), { once: true });
       try {
-        recorder.requestData();
-      } catch {
-        // el stop igual entrega el último trozo
-      }
-      try {
         recorder.stop();
       } catch {
         resolve();
@@ -233,9 +248,16 @@ export class Sala implements OnDestroy {
   }
 
   private async cerrarIntento() {
-    await this.api.request('/api/intentos/' + this.id + '/cerrar', { method: 'POST', body: {} }).catch(() => undefined);
-    this.stream?.getTracks().forEach((track) => track.stop());
-    this.pararRotulo();
+    try {
+      await this.api.request('/api/intentos/' + this.id + '/cerrar', { method: 'POST', body: {} });
+    } catch {
+      if (!this.errorSubida()) this.errorSubida.set('No se pudo confirmar el cierre de la grabación.');
+    } finally {
+      this.stream?.getTracks().forEach((track) => track.stop());
+      this.pararRotulo();
+      window.onbeforeunload = null;
+      this.finalizando.set(false);
+    }
   }
 
   private async encogerCamara() {
@@ -302,8 +324,10 @@ export class Sala implements OnDestroy {
       this.finTexto.set('Este nombre ya envió la respuesta. Ya puedes cerrar la ventana.');
     } else if (sala.estado === 'sospechoso') {
       this.finTexto.set('Este intento quedó marcado. No se puede volver a abrir la pregunta.');
+    } else if (sala.trozos === 0) {
+      this.finTexto.set('No se guardó ninguna grabación. Vuelve al acceso e inténtalo con el mismo nombre y código.');
     } else {
-      this.finTexto.set('Este intento quedó incompleto. Si fue una prueba, el profesor puede borrarlo.');
+      this.finTexto.set('El intento quedó incompleto. La parte guardada está disponible para el profesor.');
     }
     this.fase.set('fin');
   }
@@ -311,7 +335,7 @@ export class Sala implements OnDestroy {
   private async abrirCamara() {
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
+        audio: this.opcionesAudio(),
         video: this.opcionesVideo(),
       });
     } catch (error) {
@@ -326,7 +350,7 @@ export class Sala implements OnDestroy {
     const track = this.stream.getVideoTracks()[0];
     const label = track?.label ?? '';
     const video = document.getElementById('preview') as HTMLVideoElement | null;
-    if (video) video.srcObject = this.stream;
+    if (video) this.ponerVideo(video, this.stream);
     await this.listarCamaras(track?.getSettings().deviceId || '');
     const medidor = document.getElementById('voz-prev');
     if (medidor) this.medir(this.stream, medidor);
@@ -383,7 +407,7 @@ export class Sala implements OnDestroy {
       const nuevo = new MediaStream([...audio, track]);
       this.stream = nuevo;
       const video = document.getElementById('preview') as HTMLVideoElement | null;
-      if (video) video.srcObject = nuevo;
+      if (video) this.ponerVideo(video, nuevo);
       viejos.forEach((item) => item.stop());
       this.camaraId.set(id);
       this.error.set('');
@@ -409,7 +433,7 @@ export class Sala implements OnDestroy {
     const stream = this.stream;
     if (!stream || !this.vivo) return;
     const cara = document.getElementById('cara') as HTMLVideoElement | null;
-    if (cara) cara.srcObject = stream;
+    if (cara) this.ponerVideo(cara, stream);
     const medidor = document.getElementById('voz-examen');
     if (medidor) this.medir(stream, medidor);
     this.ac.abort();
@@ -505,7 +529,10 @@ export class Sala implements OnDestroy {
       );
     }
     const mime = elegirMime();
-    const options: MediaRecorderOptions = { videoBitsPerSecond: REGLAS.bitrate };
+    const options: MediaRecorderOptions = {
+      videoBitsPerSecond: REGLAS.bitrate,
+      audioBitsPerSecond: REGLAS.audioBitrate,
+    };
     if (mime) options.mimeType = mime;
     const salida = await this.conRotulo(stream);
     if (!this.vivo || this.finEnCurso) return;
@@ -520,7 +547,7 @@ export class Sala implements OnDestroy {
       const blob = event.data;
       this.cola = this.cola.then(() => this.subir(blob)).catch(() => undefined);
     };
-    this.recorder.start(REGLAS.chunkMs);
+    this.recorder.start(this.api.enWeb ? 8000 : REGLAS.chunkMs);
     window.setTimeout(() => {
       if (this.recorder && this.recorder.state === 'recording') {
         try {
@@ -570,6 +597,16 @@ export class Sala implements OnDestroy {
     return !document.fullscreenElement && !doc.webkitFullscreenElement;
   }
 
+  private opcionesAudio(): MediaTrackConstraints {
+    return {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      channelCount: { ideal: 1 },
+      sampleRate: { ideal: 48000 },
+    };
+  }
+
   private opcionesVideo(deviceId?: string): MediaTrackConstraints {
     const video: MediaTrackConstraints = {
       width: { ideal: 960 },
@@ -582,6 +619,7 @@ export class Sala implements OnDestroy {
   }
 
   private async subir(blob: Blob) {
+    if (this.errorSubida()) return;
     this.enSubida = true;
     let fallo: unknown = null;
     try {
@@ -610,16 +648,23 @@ export class Sala implements OnDestroy {
             return;
           }
           if (!data.pregunta && this.preguntaVisible && !this.finEnCurso) {
-            await this.terminar(data.estado === 'incompleto' ? 'hueco' : 'camara');
+            const vencio = data.minutos > 0 && data.inicio &&
+              (performance.now() >= this.finReloj || data.ahora >= data.inicio + data.minutos * 60);
+            await this.terminar(vencio ? 'tiempo' : data.estado === 'incompleto' ? 'hueco' : 'camara');
           }
           return;
         } catch (error) {
           fallo = error;
-          await esperar(400);
+          if (intento < 2) await esperar(500 * (intento + 1));
         }
       }
+      const detalle = fallo instanceof Error ? fallo.message : 'No se pudo confirmar la subida.';
+      this.errorSubida.set(
+        this.chunkIndex === 0
+          ? 'El primer segmento no se pudo guardar. ' + detalle
+          : 'No se pudo guardar un segmento de la grabación. ' + detalle,
+      );
       if (!this.finEnCurso) await this.terminar('hueco');
-      else throw fallo;
     } finally {
       this.enSubida = false;
     }
@@ -629,14 +674,16 @@ export class Sala implements OnDestroy {
     this.preguntaVisible = true;
     this.inicio = data.inicio;
     this.minutos = data.minutos;
+    const inicioReloj = performance.now() - Math.max(0, data.ahora - (data.inicio ?? data.ahora)) * 1000;
+    this.finReloj = inicioReloj + data.minutos * 60000;
     this.pregunta.set(data.pregunta ?? '');
     const tick = () => {
       if (this.inicio == null || this.minutos == null) return;
       if (this.minutos <= 0) {
-        this.tiempo.set(fmt(Math.max(0, Math.floor(this.api.now() - this.inicio))));
+        this.tiempo.set(fmt(Math.max(0, Math.floor((performance.now() - inicioReloj) / 1000))));
         return;
       }
-      const queda = Math.max(0, Math.ceil(this.inicio + this.minutos * 60 - this.api.now()));
+      const queda = Math.max(0, Math.ceil((this.finReloj - performance.now()) / 1000));
       this.tiempo.set(fmt(queda));
       if (queda <= 0) void this.terminar('tiempo');
     };
@@ -650,7 +697,7 @@ export class Sala implements OnDestroy {
     try {
       const sala = await this.api.request<SalaDto>('/api/intentos/' + this.id + '/sala');
       if (sala.pregunta) return;
-      if (sala.minutos > 0 && sala.inicio && this.api.now() >= sala.inicio + sala.minutos * 60) {
+      if (sala.minutos > 0 && sala.inicio && sala.ahora >= sala.inicio + sala.minutos * 60) {
         await this.terminar('tiempo');
       } else if (sala.estado === 'sospechoso') {
         const grave = sala.marcas.find(
@@ -696,6 +743,7 @@ export class Sala implements OnDestroy {
     return new Promise<MediaStream>((resolve) => {
       const video = document.createElement('video');
       video.muted = true;
+      video.volume = 0;
       video.playsInline = true;
       video.srcObject = new MediaStream([origen]);
       this.rotuloVideo = video;
@@ -781,14 +829,21 @@ export class Sala implements OnDestroy {
     if (this.negro >= 3 || this.quieto >= 4) this.avisar('imagen');
   }
 
+  private ponerVideo(video: HTMLVideoElement, stream: MediaStream) {
+    video.muted = true;
+    video.volume = 0;
+    video.srcObject = stream;
+  }
+
   private medir(stream: MediaStream, root: HTMLElement) {
     this.audioStop();
     const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!Ctx) return;
+    const copia = stream.clone();
     const ctx = new Ctx();
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 1024;
-    const source = ctx.createMediaStreamSource(stream);
+    const source = ctx.createMediaStreamSource(copia);
     source.connect(analyser);
     const data = new Uint8Array(analyser.fftSize);
     const bars = Array.from(root.querySelectorAll('i'));
@@ -822,6 +877,7 @@ export class Sala implements OnDestroy {
     this.audioStop = () => {
       cancelAnimationFrame(this.frame);
       source.disconnect();
+      copia.getTracks().forEach((track) => track.stop());
       void ctx.close().catch(() => undefined);
     };
   }

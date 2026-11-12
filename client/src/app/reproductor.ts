@@ -1,4 +1,5 @@
-import { Component, ElementRef, HostListener, input, OnDestroy, output, signal, viewChild } from '@angular/core';
+import { Component, effect, ElementRef, HostListener, inject, input, OnDestroy, output, signal, viewChild } from '@angular/core';
+import { Api } from './api';
 import { fmt } from './texto';
 
 @Component({
@@ -8,7 +9,8 @@ import { fmt } from './texto';
       <video
         #medio
         playsinline
-        [src]="src()"
+        [attr.src]="archivo()"
+        preload="auto"
         (click)="alternar()"
         (loadedmetadata)="alMeta()"
         (durationchange)="alDuracion()"
@@ -16,10 +18,27 @@ import { fmt } from './texto';
         (play)="playing.set(true)"
         (pause)="playing.set(false)"
         (ended)="playing.set(false)"
-        (canplay)="listo.set(true)"
+        (loadeddata)="alListo()"
+        (canplay)="alListo()"
+        (error)="alError()"
       ></video>
-      @if (!listo()) {
-        <p class="repro-carga">Cargando</p>
+      @if (error()) {
+        <div class="repro-carga">
+          <p role="alert">{{ error() }}</p>
+          <button type="button" class="repro-reintentar" (click)="reintentar()">
+            {{ archivoLocal() ? 'Reintentar reproducción' : 'Reintentar descarga' }}
+          </button>
+        </div>
+      } @else if (!listo()) {
+        <div class="repro-carga" role="status">
+          @if (archivo()) {
+            <p>Preparando el video</p>
+            <progress aria-label="Preparando el video"></progress>
+          } @else {
+            <p>Descargando grabación @if (progreso() !== null) { · {{ progreso() }}% }</p>
+            <progress max="100" [attr.value]="progreso()" aria-label="Descargando grabación"></progress>
+          }
+        </div>
       }
       <div class="cine-arriba">
         <strong>{{ titulo() }}</strong>
@@ -30,11 +49,12 @@ import { fmt } from './texto';
           </svg>
         </button>
       </div>
-      @if (!playing()) {
+      @if (listo() && !playing()) {
         <button class="cine-centro" type="button" (click)="alternar()" aria-label="Reproducir">
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 2.4v11.2L13.4 8z" /></svg>
         </button>
       }
+      @if (listo()) {
       <div class="cine-abajo">
         <div class="repro-pista" (pointerdown)="buscar($event)">
           <span class="repro-lleno" [style.width.%]="porcentaje()"></span>
@@ -81,11 +101,13 @@ import { fmt } from './texto';
           </div>
         </div>
       </div>
+      }
     </div>
   `,
 })
 export class Reproductor implements OnDestroy {
   readonly src = input.required<string>();
+  readonly archivoLocal = input<string | null>(null);
   readonly estimado = input(0);
   readonly autoplay = input(true);
   readonly titulo = input('');
@@ -98,16 +120,89 @@ export class Reproductor implements OnDestroy {
   readonly nivel = signal(100);
   readonly volumenAbierto = signal(false);
   readonly listo = signal(false);
+  readonly archivo = signal<string | null>(null);
+  readonly error = signal('');
+  readonly progreso = signal<number | null>(null);
 
   private readonly medio = viewChild<ElementRef<HTMLVideoElement>>('medio');
+  private readonly api = inject(Api);
   private readonly cajaVolumen = viewChild<ElementRef<HTMLElement>>('volumen');
-  private arreglando = false;
+  private readonly intentoDescarga = signal(0);
+  private esperaVideo = 0;
   private arranco = false;
   private audio: AudioContext | null = null;
   private ganancia: GainNode | null = null;
   private nivelPrevio = 100;
   private cierreVol = 0;
   private readonly flota = matchMedia('(hover: hover) and (pointer: fine)').matches;
+
+  constructor() {
+    effect((limpiar) => {
+      const ruta = this.src();
+      const local = this.archivoLocal();
+      this.intentoDescarga();
+      const control = new AbortController();
+      let archivo: string | undefined;
+      this.archivo.set(null);
+      this.error.set('');
+      this.listo.set(false);
+      this.progreso.set(null);
+      this.actual.set(0);
+      this.total.set(0);
+      this.playing.set(false);
+      this.arranco = false;
+      limpiar(() => {
+        control.abort();
+        window.clearTimeout(this.esperaVideo);
+        if (archivo) URL.revokeObjectURL(archivo);
+      });
+      const preparar = (url: string) => {
+        this.archivo.set(url);
+        this.esperaVideo = window.setTimeout(() => {
+          if (!this.listo()) this.error.set('Se descargó el video, pero el navegador no pudo prepararlo.');
+        }, 15000);
+      };
+      if (local) {
+        preparar(local);
+        return;
+      }
+      void this.api.descargarVideo(ruta, control.signal, (avance) => {
+        if (!control.signal.aborted) this.progreso.set(avance);
+      })
+        .then((datos) => {
+          if (control.signal.aborted) return;
+          archivo = URL.createObjectURL(datos);
+          preparar(archivo);
+        })
+        .catch((error: unknown) => {
+          if (control.signal.aborted) return;
+          this.error.set(error instanceof Error && error.name === 'TimeoutError'
+            ? 'El servidor tardó demasiado en entregar un segmento.'
+            : 'No se pudo descargar el video completo.');
+          control.abort();
+        });
+    });
+  }
+
+  alError() {
+    if (!this.archivo()) return;
+    window.clearTimeout(this.esperaVideo);
+    this.listo.set(false);
+    this.error.set('El navegador no pudo reproducir este video.');
+  }
+
+  alListo() {
+    if (this.listo() || !this.archivo()) return;
+    window.clearTimeout(this.esperaVideo);
+    this.error.set('');
+    this.listo.set(true);
+    const video = this.medio()?.nativeElement;
+    if (video) this.comenzar(video);
+  }
+
+  reintentar() {
+    this.intentoDescarga.update((valor) => valor + 1);
+  }
 
   ngOnDestroy() {
     const video = this.medio()?.nativeElement;
@@ -124,22 +219,16 @@ export class Reproductor implements OnDestroy {
     const video = this.medio()?.nativeElement;
     if (!video) return;
     this.tomarDuracion(video);
-    if (this.total() > 0) {
-      this.comenzar(video);
-      return;
-    }
-    if (this.estimado() > 0) this.total.set(this.estimado());
-    this.arreglar(video);
+    if (!this.total() && this.estimado() > 0) this.total.set(this.estimado());
   }
 
   alDuracion() {
     const video = this.medio()?.nativeElement;
-    if (!video || this.arreglando) return;
+    if (!video) return;
     this.tomarDuracion(video);
   }
 
   alTiempo() {
-    if (this.arreglando) return;
     const video = this.medio()?.nativeElement;
     if (!video) return;
     this.actual.set(video.currentTime || 0);
@@ -147,6 +236,7 @@ export class Reproductor implements OnDestroy {
   }
 
   alternar() {
+    if (!this.listo()) return;
     const video = this.medio()?.nativeElement;
     if (!video) return;
     if (video.paused) void video.play().catch(() => undefined);
@@ -226,6 +316,7 @@ export class Reproductor implements OnDestroy {
       this.cerrar.emit();
       return;
     }
+    if (!this.listo()) return;
     if (event.key === 'ArrowUp') {
       event.preventDefault();
       this.subir();
@@ -294,25 +385,4 @@ export class Reproductor implements OnDestroy {
     void video.play().catch(() => undefined);
   }
 
-  private arreglar(video: HTMLVideoElement) {
-    this.arreglando = true;
-    const listo = () => {
-      video.removeEventListener('timeupdate', listo);
-      this.tomarDuracion(video);
-      this.arreglando = false;
-      try {
-        video.currentTime = 0;
-      } catch {
-        // el navegador no dejó volver al inicio
-      }
-      this.comenzar(video);
-    };
-    video.addEventListener('timeupdate', listo);
-    try {
-      video.currentTime = 1e101;
-    } catch {
-      this.arreglando = false;
-      this.comenzar(video);
-    }
-  }
 }

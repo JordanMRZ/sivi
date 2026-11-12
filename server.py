@@ -10,6 +10,8 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
+from drive_videos import DriveVideos
+
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
@@ -20,6 +22,11 @@ WEB = os.path.join(ROOT, "web")
 DATA = os.path.join(ROOT, "data")
 VIDEOS = os.path.join(DATA, "videos")
 DB_PATH = os.path.join(DATA, "db.json")
+DRIVE_CONFIG = os.environ.get("AVIA_DRIVE_CONFIG") or os.path.join(DATA, "drive-connection.json")
+FIRESTORE_DOC = os.environ.get("AVIA_FIRESTORE_DOC")
+CLOUD_PORT = os.environ.get("PORT")
+SESSION_COOKIE = "__session" if CLOUD_PORT else "sesion"
+_firestore = None
 
 GAP_SECONDS = 25
 CHUNK_MAX = 8 * 1024 * 1024
@@ -67,8 +74,23 @@ def write_json(path, payload):
     os.replace(tmp, path)
 
 
+class CloudDatabase(dict):
+    def __init__(self, snapshot):
+        super().__init__(snapshot.to_dict() or {})
+        self.snapshot = snapshot
+
+
+def cloud_document():
+    global _firestore
+    if _firestore is None:
+        from google.cloud import firestore
+
+        _firestore = firestore.Client()
+    return _firestore.document(FIRESTORE_DOC)
+
+
 def load_db():
-    db = read_json(DB_PATH, {})
+    db = CloudDatabase(cloud_document().get()) if FIRESTORE_DOC else read_json(DB_PATH, {})
     db.setdefault("examenes", [])
     db.setdefault("intentos", [])
     db.setdefault("profesores", [])
@@ -77,6 +99,18 @@ def load_db():
 
 
 def save_db(db):
+    if FIRESTORE_DOC:
+        from google.api_core.exceptions import AlreadyExists, FailedPrecondition
+
+        try:
+            if db.snapshot.exists:
+                option = _firestore.write_option(last_update_time=db.snapshot.update_time)
+                db.snapshot.reference.update(dict(db), option=option)
+            else:
+                db.snapshot.reference.create(dict(db))
+        except (AlreadyExists, FailedPrecondition) as error:
+            raise ApiError(503, "La evaluación cambió. Vuelve a intentarlo.") from error
+        return
     write_json(DB_PATH, db)
 
 
@@ -168,6 +202,9 @@ def publico_intento(intento):
     return {
         "id": intento["id"],
         "nombre": intento["nombre"],
+        "profesor": intento.get("profesor", ""),
+        "semestre": intento.get("semestre", ""),
+        "materia": intento.get("materia", ""),
         "estado": intento["estado"],
         "marcas": intento["marcas"],
         "trozos": intento["trozos"],
@@ -187,12 +224,21 @@ def carpeta_intento(intento_id):
 
 
 def borrar_carpeta(intento_id):
+    drive = drive_videos()
+    if drive:
+        drive.borrar(intento_id)
     folder = os.path.join(VIDEOS, intento_id)
     if not os.path.isdir(folder):
         return
     for name in os.listdir(folder):
         os.remove(os.path.join(folder, name))
     os.rmdir(folder)
+
+
+def drive_videos():
+    if os.environ.get("AVIA_DRIVE_CONFIG") or os.path.isfile(DRIVE_CONFIG):
+        return DriveVideos(DRIVE_CONFIG)
+    return None
 
 
 def clave_valida(clave):
@@ -401,9 +447,9 @@ def borrar_examen(profesor, codigo):
     ids = [item["id"] for item in db["intentos"] if item["codigo"] == examen["codigo"]]
     db["examenes"] = [item for item in db["examenes"] if item.get("codigo") != examen["codigo"]]
     db["intentos"] = [item for item in db["intentos"] if item["codigo"] != examen["codigo"]]
-    save_db(db)
     for intento_id in ids:
         borrar_carpeta(intento_id)
+    save_db(db)
     return {"ok": True}
 
 
@@ -412,6 +458,13 @@ def abrir_intento(body):
     if any(char not in CODE_ALPHABET for char in codigo):
         raise ApiError(400, "Ese código no existe")
     nombre = clean_text(body.get("nombre"), 2, 60, "Escribe tu nombre")
+    contexto = {}
+    if any(campo in body for campo in ("profesor", "semestre", "materia")):
+        contexto = {
+            "profesor": clean_text(body.get("profesor"), 2, 100, "Escribe el nombre del profesor"),
+            "semestre": clean_text(body.get("semestre"), 1, 40, "Escribe el semestre"),
+            "materia": clean_text(body.get("materia"), 2, 100, "Escribe la materia"),
+        }
     clave_nombre = nombre.casefold()
     db = load_db()
     examen = buscar_examen(db, codigo=codigo)
@@ -419,6 +472,11 @@ def abrir_intento(body):
         raise ApiError(404, "Ese código no existe")
     for intento in db["intentos"]:
         if intento["codigo"] == examen["codigo"] and intento["nombreKey"] == clave_nombre:
+            if intento["estado"] == "incompleto" and not intento["trozos"]:
+                continue
+            if intento["estado"] == "esperando" and not intento.get("profesor") and contexto:
+                intento.update(contexto)
+                save_db(db)
             return {
                 "id": intento["id"],
                 "estado": intento["estado"],
@@ -431,6 +489,7 @@ def abrir_intento(body):
         "codigo": examen["codigo"],
         "nombre": nombre,
         "nombreKey": clave_nombre,
+        **contexto,
         "minutos": examen["minutos"],
         "estado": "esperando",
         "marcas": [],
@@ -491,16 +550,23 @@ def guardar_trozo(intento_id, index, data, dispositivo):
     momento = now()
     evaluar(intento, momento)
     folder = carpeta_intento(intento_id)
-    os.makedirs(folder, exist_ok=True)
     contenedor = intento.get("contenedor") or _contenedor(data)
-    path = os.path.join(folder, f"{index:04d}.{contenedor}")
-    if index == intento["trozos"] - 1 and os.path.exists(path):
+    nombre = f"{index:04d}.{contenedor}"
+    path = os.path.join(folder, nombre)
+    if index == intento["trozos"] - 1 and (
+        os.path.exists(path) or drive_videos() is not None
+    ):
         pass
     elif index != intento["trozos"]:
         raise ApiError(409, "El video llegó fuera de orden")
     else:
-        with open(path, "wb") as handle:
-            handle.write(data)
+        drive = drive_videos()
+        if drive:
+            drive.guardar(intento_id, nombre, data)
+        else:
+            os.makedirs(folder, exist_ok=True)
+            with open(path, "wb") as handle:
+                handle.write(data)
         intento["contenedor"] = contenedor
         intento["trozos"] += 1
         intento["ultimoTrozo"] = momento
@@ -580,8 +646,8 @@ def borrar_intento(profesor, intento_id):
     if not intento or not examen or examen.get("profesorId") != profesor["id"]:
         raise ApiError(404, "No está ese intento")
     db["intentos"] = [item for item in db["intentos"] if item["id"] != intento_id]
-    save_db(db)
     borrar_carpeta(intento_id)
+    save_db(db)
     return {"ok": True}
 
 
@@ -851,7 +917,7 @@ class Handler(BaseHTTPRequestHandler):
             return directo
         for part in (self.headers.get("Cookie") or "").split(";"):
             part = part.strip()
-            if part.startswith("sesion="):
+            if part.startswith(SESSION_COOKIE + "="):
                 return unquote(part.split("=", 1)[1])
         return ""
 
@@ -936,11 +1002,21 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(404, "No está")
 
     def send_video(self, intento_id):
-        files = archivos_video(intento_id)
-        if not files:
+        files = {os.path.basename(path): path for path in archivos_video(intento_id)}
+        drive = drive_videos()
+        remotos = drive.listar(intento_id) if drive else {}
+        nombres = sorted(files.keys() | remotos.keys())
+        if not nombres:
             raise ApiError(404, "Todavía no hay video")
-        crudo = b"".join(open(path, "rb").read() for path in files)
-        es_mp4 = files[0].endswith(".mp4")
+        segmentos = []
+        for nombre in nombres:
+            if nombre in remotos:
+                segmentos.append(drive.leer(remotos[nombre]))
+            else:
+                with open(files[nombre], "rb") as handle:
+                    segmentos.append(handle.read())
+        crudo = b"".join(segmentos)
+        es_mp4 = nombres[0].endswith(".mp4")
         try:
             data = crudo if es_mp4 else _indexar_webm(crudo)
         except (OSError, ValueError):
@@ -1024,14 +1100,19 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         if clear_cookie:
-            self.send_header("Set-Cookie", "sesion=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+            self.send_header("Set-Cookie", f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" + ("; Secure" if CLOUD_PORT else ""))
         elif cookie:
-            self.send_header("Set-Cookie", f"sesion={cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000")
+            self.send_header("Set-Cookie", f"{SESSION_COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000" + ("; Secure" if CLOUD_PORT else ""))
         self.end_headers()
         self.wfile.write(data)
 
 
 def main():
+    if CLOUD_PORT:
+        if not FIRESTORE_DOC or not os.environ.get("AVIA_DRIVE_CONFIG") or not os.path.isfile(DRIVE_CONFIG):
+            raise SystemExit("Cloud Run requiere AVIA_FIRESTORE_DOC y el secreto AVIA_DRIVE_CONFIG.")
+        Server(("0.0.0.0", int(CLOUD_PORT)), Handler).serve_forever()
+        return
     os.makedirs(VIDEOS, exist_ok=True)
     server = None
     port = 8787

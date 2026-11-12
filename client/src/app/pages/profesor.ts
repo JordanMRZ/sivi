@@ -9,6 +9,9 @@ import { fmt, formatoCodigo, hace } from '../texto';
 interface Fila {
   id: string | null;
   nombre: string;
+  profesor?: string;
+  semestre?: string;
+  materia?: string;
   cuando: string;
   codigo: string;
   codigoPlano: string;
@@ -18,6 +21,13 @@ interface Fila {
   video: boolean;
   marcas: string[];
   revision: string;
+}
+
+interface DescargaVideo {
+  control: AbortController;
+  progreso?: number;
+  url?: string;
+  error?: boolean;
 }
 
 interface Grupo {
@@ -127,10 +137,32 @@ interface Grupo {
                     <span></span>
                   </div>
                   @for (fila of grupo.filas; track fila.id; let n = $index) {
-                    <div class="respuesta" [class.quiet]="!fila.video" (click)="abrir(fila)">
+                    @let descarga = fila.id ? descargas()[fila.id] : undefined;
+                    @if (enWeb && fila.video && !descarga?.url && !descarga?.error) {
+                      <div class="descarga-fila" role="status">
+                        <span>{{ descarga ? 'Descargando el video' : 'En espera de descarga' }} · {{ fila.nombre }}</span>
+                        @if (descarga) {
+                          @if (descarga.progreso !== undefined) {
+                            <strong>{{ descarga.progreso }}%</strong>
+                          }
+                          <div
+                            class="descarga-pista"
+                            [class.indeterminada]="descarga.progreso === undefined"
+                            role="progressbar"
+                            aria-label="Descargando el video"
+                            [attr.aria-valuenow]="descarga.progreso ?? null"
+                          >
+                            <span [style.width.%]="descarga.progreso ?? 30"></span>
+                          </div>
+                        }
+                      </div>
+                    } @else {
+                    <div class="respuesta" [class.quiet]="!fila.video" [class.descarga-lista]="descarga?.url" (click)="abrir(fila)">
                       <span class="num">{{ n + 1 }}</span>
-                      <span class="miniatura" [class.espera]="fila.video && !visto(fila.id)">
-                        @if (fila.video && fila.id) {
+                      <span class="miniatura" [class.espera]="!enWeb && fila.video && !visto(fila.id)">
+                        @if (descarga?.url; as url) {
+                          <video class="cuadro" muted playsinline preload="auto" [src]="url"></video>
+                        } @else if (!enWeb && fila.video && fila.id) {
                           <video
                             class="cuadro"
                             muted
@@ -151,7 +183,19 @@ interface Grupo {
                       </span>
                       <span>
                         <span class="nombre-fila">{{ fila.nombre }}</span>
-                        <small>{{ fila.cuando }}</small>
+                        @if (fila.materia || fila.semestre) {
+                          <small class="datos-fila">
+                            {{ fila.materia }}@if (fila.materia && fila.semestre) { · }@if (fila.semestre) { Sem. {{ fila.semestre }} }
+                          </small>
+                        }
+                        <small class="datos-fila">
+                          @if (fila.profesor) { Prof. {{ fila.profesor }} · }{{ fila.cuando }}
+                        </small>
+                        @if (descarga?.error) {
+                          <button class="descarga-boton" type="button" (click)="$event.stopPropagation(); abrir(fila)">
+                            Reintentar descarga
+                          </button>
+                        }
                       </span>
                       <span class="estado-rev" [class.visto]="fila.revision !== 'nueva'">
                         {{ fila.revision === 'nueva' ? 'Sin ver' : 'Visto' }}
@@ -165,8 +209,8 @@ interface Grupo {
                       </span>
                       <span class="col">{{ fila.duracion }}</span>
                       <span class="fila-acciones" (click)="$event.stopPropagation()">
-                        @if (fila.video && fila.id) {
-                          <button class="borrar-fila" type="button" aria-label="Eliminar video" (click)="pedirBorrar(fila)">
+                        @if (fila.id) {
+                          <button class="borrar-fila" type="button" aria-label="Eliminar intento" (click)="pedirBorrar(fila)">
                             <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
                               <path d="M3 6h18" />
                               <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
@@ -178,6 +222,7 @@ interface Grupo {
                         }
                       </span>
                     </div>
+                    }
                   }
                 </div>
               }
@@ -292,7 +337,7 @@ interface Grupo {
                   <path d="m6 6 12 12" />
                 </svg>
               </button>
-              <h2>{{ pedido.tipo === 'video' ? 'Eliminar video' : 'Retirar pregunta' }}</h2>
+              <h2>{{ pedido.tipo === 'video' ? 'Eliminar intento' : 'Retirar pregunta' }}</h2>
               <p class="hoja-ayuda">
                 {{ pedido.tipo === 'video'
                   ? 'Se borra la respuesta de ' + pedido.fila.nombre + '. La pregunta sigue.'
@@ -313,6 +358,7 @@ interface Grupo {
         @if (abierto(); as video) {
           <app-reproductor
             [src]="'/api/intentos/' + video.id + '/video'"
+            [archivoLocal]="video.id ? descargas()[video.id]?.url ?? null : null"
             [estimado]="video.segundos"
             [titulo]="video.nombre"
             (cerrar)="cerrar()"
@@ -332,7 +378,7 @@ interface Grupo {
     } @else {
       <section class="puerta">
         <div class="puerta-arte">
-          <p class="puerta-marca"><app-marca />AVIA</p>
+          <p class="puerta-marca"><app-marca />SiVI</p>
           <svg class="puerta-dibujo" viewBox="0 0 440 420" fill="none" aria-hidden="true">
             <rect x="28" y="36" width="248" height="176" rx="28" stroke="#fff" stroke-width="2" />
             <circle cx="152" cy="112" r="38" stroke="#fff" stroke-width="2" />
@@ -368,15 +414,15 @@ interface Grupo {
               </label>
             }
             <label>
-              <span>Usuario</span>
-              <input name="usuario" autocomplete="username" required [value]="usuario()" (input)="alUsuario($event)" />
+              <span>{{ enWeb ? 'Correo' : 'Usuario' }}</span>
+              <input name="usuario" [type]="enWeb ? 'email' : 'text'" autocomplete="username" required [value]="usuario()" (input)="alUsuario($event)" />
             </label>
             <label>
               <span>Clave</span>
               <input
                 name="clave"
                 type="password"
-                minlength="4"
+                [attr.minlength]="enWeb ? 6 : 4"
                 required
                 [attr.autocomplete]="alta() ? 'new-password' : 'current-password'"
                 [value]="clave()"
@@ -399,6 +445,7 @@ interface Grupo {
 })
 export class Profesor implements OnDestroy {
   private readonly api = inject(Api);
+  readonly enWeb = this.api.enWeb;
   private readonly router = inject(Router);
   private timer = 0;
 
@@ -411,6 +458,7 @@ export class Profesor implements OnDestroy {
   readonly usuario = signal('');
   readonly clave = signal('');
   readonly abierto = signal<Fila | null>(null);
+  readonly descargas = signal<Record<string, DescargaVideo>>({});
   readonly creando = signal(false);
   readonly preguntaNueva = signal('');
   readonly minutosNuevos = signal(5);
@@ -442,6 +490,9 @@ export class Profesor implements OnDestroy {
   private chipTimer = 0;
   private borrarTimer = 0;
   private chipId = 0;
+  private descargandoCola = false;
+  private destruido = false;
+  private versionPanel = 0;
   private pendiente: { tipo: 'video' | 'pregunta'; id: string } | null = null;
 
   constructor() {
@@ -449,10 +500,12 @@ export class Profesor implements OnDestroy {
     void this.cargar(true);
     this.timer = window.setInterval(() => {
       if (this.panel()) void this.cargar(false);
-    }, 4000);
+    }, this.enWeb ? 10000 : 4000);
   }
 
   ngOnDestroy() {
+    this.destruido = true;
+    this.limpiarDescargas();
     document.body.classList.remove('fondo-blanco');
     window.clearInterval(this.timer);
     window.clearTimeout(this.chipTimer);
@@ -484,14 +537,22 @@ export class Profesor implements OnDestroy {
         .map((intento) => ({
           id: intento.id,
           nombre: intento.nombre,
+          profesor: intento.profesor,
+          semestre: intento.semestre,
+          materia: intento.materia,
           cuando: hace(intento.inicio, this.api.now()),
           codigo: formatoCodigo(examen.codigo),
           codigoPlano: examen.codigo,
           pregunta: examen.pregunta,
           duracion: intento.segundos ? fmt(intento.segundos) : intento.trozos ? fmt(intento.trozos * 4) : '—',
           segundos: intento.segundos || intento.trozos * 4,
-          video: intento.trozos > 0 && intento.estado !== 'esperando',
-          marcas: intento.marcas ?? [],
+          video: intento.trozos > 0 && intento.estado !== 'esperando' &&
+            (!this.enWeb || intento.estado !== 'grabando'),
+          marcas: intento.videoEliminado
+            ? [...(intento.marcas ?? []), 'video_vencido']
+            : intento.estado === 'incompleto' && !intento.trozos
+            ? [...(intento.marcas ?? []), 'sin_grabacion']
+            : intento.marcas ?? [],
           revision: intento.revision || 'nueva',
         }));
       const texto = (examen.codigo + ' ' + formatoCodigo(examen.codigo) + ' ' + examen.pregunta).toLocaleLowerCase();
@@ -531,8 +592,65 @@ export class Profesor implements OnDestroy {
 
   abrir(fila: Fila) {
     if (!fila.video || !fila.id) return;
+    if (this.enWeb && !this.descargas()[fila.id]?.url) {
+      if (!this.descargas()[fila.id] || this.descargas()[fila.id].error) {
+        void this.descargarEnPanel(fila.id);
+      }
+      return;
+    }
     this.abierto.set(fila);
     if (fila.revision === 'nueva') void this.ponerRevision(fila, 'vista');
+  }
+
+  private async descargarEnPanel(id: string) {
+    const control = new AbortController();
+    const actualizar = (descarga: DescargaVideo) =>
+      this.descargas.update((mapa) => ({ ...mapa, [id]: descarga }));
+    actualizar({ control });
+    try {
+      const datos = await this.api.descargarVideo('/api/intentos/' + id + '/video', control.signal, (progreso) => {
+        if (!control.signal.aborted) actualizar({ control, progreso });
+      });
+      if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 420));
+      }
+      if (!control.signal.aborted) actualizar({ control, url: URL.createObjectURL(datos) });
+    } catch {
+      if (!control.signal.aborted) {
+        control.abort();
+        actualizar({ control, error: true });
+      }
+    }
+  }
+
+  private async descargarPendientes() {
+    if (!this.enWeb || this.descargandoCola || this.destruido) return;
+    this.descargandoCola = true;
+    try {
+      while (!this.destruido) {
+        const intentos = this.panel()?.examenes.flatMap((examen) => examen.intentos) ?? [];
+        const siguiente = intentos.find((intento) =>
+          intento.trozos > 0 && !['esperando', 'grabando'].includes(intento.estado) &&
+          !this.descargas()[intento.id],
+        );
+        if (!siguiente) return;
+        await this.descargarEnPanel(siguiente.id);
+      }
+    } finally {
+      this.descargandoCola = false;
+    }
+  }
+
+  private limpiarDescargas(ids = Object.keys(this.descargas())) {
+    const mapa = { ...this.descargas() };
+    for (const id of ids) {
+      const descarga = mapa[id];
+      if (!descarga) continue;
+      descarga.control.abort();
+      if (descarga.url) URL.revokeObjectURL(descarga.url);
+      delete mapa[id];
+    }
+    this.descargas.set(mapa);
   }
 
   cerrar() {
@@ -631,7 +749,7 @@ export class Profesor implements OnDestroy {
       if (!pedido.fila.id) return;
       this.ocultos.update((ids) => [...ids, pedido.fila.id!]);
       this.pendiente = { tipo: 'video', id: pedido.fila.id };
-      this.mostrarAviso('Video eliminado', true);
+      this.mostrarAviso('Intento eliminado', true);
     } else {
       this.preguntasOcultas.update((codigos) => [...codigos, pedido.fila.codigoPlano]);
       this.pendiente = { tipo: 'pregunta', id: pedido.fila.codigoPlano };
@@ -690,6 +808,8 @@ export class Profesor implements OnDestroy {
         fullscreen: 'Salió de pantalla',
         virtual: 'Cámara virtual',
         hueco: 'Grabación cortada',
+        sin_grabacion: 'Sin grabación · puede reintentar',
+        video_vencido: 'Grabación vencida',
         segunda_pantalla: 'Otra pantalla',
         copiar: 'Copió texto',
         pegar: 'Pegó texto',
@@ -812,9 +932,20 @@ export class Profesor implements OnDestroy {
   }
 
   async cargar(inicial: boolean) {
+    const version = this.versionPanel;
     if (inicial) this.cargando.set(true);
     try {
-      this.panel.set(await this.api.request<Panel>('/api/profesor'));
+      const panel = await this.api.request<Panel>('/api/profesor');
+      if (this.destruido || version !== this.versionPanel) return;
+      const vigentes = new Set(panel.examenes.flatMap((examen) =>
+        examen.intentos.filter((intento) => !intento.videoEliminado).map((intento) => intento.id)
+      ));
+      const retirados = Object.keys(this.descargas()).filter((id) => !vigentes.has(id));
+      const abierto = this.abierto()?.id;
+      if (abierto && retirados.includes(abierto)) this.cerrar();
+      if (retirados.length) this.limpiarDescargas(retirados);
+      this.panel.set(panel);
+      void this.descargarPendientes();
     } catch {
       if (inicial) this.panel.set(null);
     } finally {
@@ -833,7 +964,7 @@ export class Profesor implements OnDestroy {
 
   alUsuario(event: Event) {
     const input = event.target as HTMLInputElement;
-    const limpio = input.value.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20);
+    const limpio = this.enWeb ? input.value : input.value.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20);
     this.usuario.set(limpio);
   }
 
@@ -861,8 +992,11 @@ export class Profesor implements OnDestroy {
   }
 
   async salir() {
-    await this.api.request('/api/salir', { method: 'POST', body: {} }).catch(() => undefined);
+    this.versionPanel += 1;
+    this.cerrar();
     this.panel.set(null);
+    this.limpiarDescargas();
+    await this.api.request('/api/salir', { method: 'POST', body: {} }).catch(() => undefined);
     await this.router.navigateByUrl('/profesor');
   }
 }

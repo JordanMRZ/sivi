@@ -1,0 +1,9 @@
+{
+  "hosting": {
+    "site": "sivi",
+    "public": "web",
+    "rewrites": [
+      { "source": "**", "destination": "/index.html" }
+    ]
+  }
+}

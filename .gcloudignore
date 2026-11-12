@@ -1,0 +1,6 @@
+**
+!Dockerfile
+!requirements-drive.txt
+!requirements-cloud.txt
+!server.py
+!drive_videos.py
