@@ -11,7 +11,7 @@ function doPost(e) {
   let respuesta = { ok: false, error: 'Solicitud inválida' };
   try {
     const datos = JSON.parse(e.postData.contents);
-    if (datos.accion === 'ping') respuesta = { ok: true, servicio: 'AVIA', api: 6 };
+    if (datos.accion === 'ping') respuesta = { ok: true, servicio: 'AVIA', api: 11 };
     else if (datos.accion === 'api') respuesta = { ok: true, datos: aviaApi(datos) };
   } catch (error) {
     if (!error.avia) console.error('AVIA: ' + error.message);

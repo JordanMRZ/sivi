@@ -23,7 +23,11 @@ import { fmt } from './texto';
         (error)="alError()"
       ></video>
       @if (error()) {
-        <div class="repro-carga">
+        <div class="repro-carga repro-fallo">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="4" /><path d="M12 8v4m0 4h.01" />
+          </svg>
+          <h2>No se pudo cargar el video</h2>
           <p role="alert">{{ error() }}</p>
           <button type="button" class="repro-reintentar" (click)="reintentar()">
             {{ archivoLocal() ? 'Reintentar reproducción' : 'Reintentar descarga' }}

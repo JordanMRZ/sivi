@@ -8,7 +8,7 @@ import { Marca } from './marca';
   template: `
     <div class="marco">
       <header class="barra">
-        <a class="word" [routerLink]="inicio()"><app-marca />SiVI</a>
+        <a class="word" [routerLink]="inicio()"><app-marca variante="contorno" /></a>
         <div class="top-actions">
           <ng-content select="[acciones]" />
         </div>

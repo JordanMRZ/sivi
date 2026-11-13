@@ -1,10 +1,12 @@
 import { Component, HostListener, computed, inject, OnDestroy, signal } from '@angular/core';
 import { Router } from '@angular/router';
-import { Api, Panel } from '../api';
+import { Api, Panel, servicioNoDisponible } from '../api';
+import { EstadoPagina } from '../estado-pagina';
 import { Marco } from '../marco';
 import { Marca } from '../marca';
 import { Reproductor } from '../reproductor';
-import { fmt, formatoCodigo, hace } from '../texto';
+import { RUTA_DOCENTE } from '../ruta-docente';
+import { esperar, fmt, formatoCodigo, hace } from '../texto';
 
 interface Fila {
   id: string | null;
@@ -13,6 +15,7 @@ interface Fila {
   semestre?: string;
   materia?: string;
   cuando: string;
+  fecha?: number;
   codigo: string;
   codigoPlano: string;
   pregunta: string;
@@ -34,30 +37,33 @@ interface Grupo {
   codigo: string;
   codigoPlano: string;
   pregunta: string;
+  minutos: number;
+  vence?: number;
   filas: Fila[];
 }
 
 @Component({
   selector: 'app-profesor',
-  imports: [Marco, Marca, Reproductor],
+  imports: [Marco, Marca, Reproductor, EstadoPagina],
+  styleUrl: './profesor.css',
   template: `
     @if (cargando()) {
-      <app-marco inicio="/profesor">
-        <p class="kicker">Profesor</p>
-        <h1>Un momento</h1>
-      </app-marco>
+      <div class="sala-carga" role="status" aria-label="Cargando el panel del profesor">
+        <app-marca variante="carga" />
+      </div>
+    } @else if (errorPanel()) {
+      <app-estado-pagina [codigo]="503" titulo="No se pudo cargar el panel"
+        mensaje="Revisa tu conexión e inténtalo de nuevo." accion="Reintentar" (actuar)="cargar(true)" />
     } @else if (panel(); as datos) {
-      <app-marco inicio="/profesor">
+      <app-marco [inicio]="rutaDocente">
         <div acciones>
-          <div class="cuenta">
-            <p class="quien">
-              <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
-                <circle cx="12" cy="7" r="4" />
-              </svg>
-              {{ datos.nombre }}
-            </p>
-            <button class="salir" type="button" (click)="salir()" aria-label="Salir">
+          <div class="cuenta-docente">
+            <span class="avatar" aria-hidden="true">{{ iniciales(datos.nombre) }}</span>
+            <span class="cuenta-texto">
+              <strong>{{ datos.nombre }}</strong>
+              <small>Docente</small>
+            </span>
+            <button class="cuenta-salir" type="button" (click)="salir()" aria-label="Salir" title="Salir">
               <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
                 <polyline points="16 17 21 12 16 7" />
@@ -66,172 +72,280 @@ interface Grupo {
             </button>
           </div>
         </div>
-        <section class="gestion">
-          <h1>Tus preguntas</h1>
-          <p class="gestion-texto">Los códigos que creaste y el video de cada respuesta.</p>
-          <div class="gestion-barra">
-            <button class="crear" type="button" (click)="empezarCreacion()">Crear una pregunta</button>
-            <input
-              class="filtro"
-              type="search"
-              placeholder="Nombre o código"
-              [value]="filtro()"
-              (input)="filtro.set(texto($event))"
-            />
+        @let resumen = estadisticas();
+        <div class="panel-docente">
+        <header class="panel-encabezado">
+          <div>
+            <p class="panel-kicker">Panel docente</p>
+            <h1>Hola, {{ primerNombre(datos.nombre) }}</h1>
+            <p class="panel-sub">Crea preguntas, comparte el código y revisa cada respuesta en video.</p>
           </div>
-          @if (!grupos(datos).length) {
-            @if (filtro()) {
-              <p class="vacio">Nada coincide con la búsqueda.</p>
-            } @else {
-              <div class="vacio-centro">
-                <svg class="vacio-dibujo" viewBox="0 0 320 200" fill="none" aria-hidden="true">
-                  <rect x="18" y="28" width="168" height="112" rx="22" stroke="#1a1a1a" stroke-width="2" />
-                  <circle cx="102" cy="78" r="26" stroke="#1a1a1a" stroke-width="2" />
-                  <circle cx="93" cy="73" r="2.4" fill="#1a1a1a" />
-                  <circle cx="111" cy="73" r="2.4" fill="#1a1a1a" />
-                  <path d="M92 86c6 7 16 7 22 0" stroke="#1a1a1a" stroke-width="2" stroke-linecap="round" />
-                  <path stroke="#1a1a1a" stroke-width="3" stroke-linecap="round" d="M28 168v14M44 158v34M60 170v10M76 152v46M92 164v22M108 146v58M124 162v26M140 154v42" />
-                  <path fill="#1a1a1a" fill-rule="evenodd" d="M236 36 286 124H186L236 36zm0 28 10 22h-20l10-22z" />
-                  <circle cx="248" cy="158" r="18" stroke="#1a1a1a" stroke-width="2" />
-                  <circle cx="248" cy="158" r="3.5" fill="#1a1a1a" />
-                </svg>
-                <p>Todavía no hay preguntas.</p>
-              </div>
-            }
-          }
-          @for (grupo of grupos(datos); track grupo.codigoPlano) {
-            <section class="grupo">
-              <header class="grupo-cabeza">
-                <div class="codigo-bloque">
-                  <span class="codigo-etiqueta">Código</span>
-                  <button class="codigo-copia" type="button" (click)="copiar(grupo.codigoPlano, 'lista')">{{ grupo.codigo }}</button>
-                </div>
-                <p class="grupo-pregunta">{{ grupo.pregunta }}</p>
-                <span class="grupo-cuenta">{{ cuentaGrupo(grupo) }}</span>
-                <button class="borrar-fila" type="button" aria-label="Editar pregunta" (click)="empezarEdicion(grupo)">
-                  <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M12 20h9" />
-                    <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
-                  </svg>
-                </button>
-                <button class="borrar-fila" type="button" aria-label="Retirar pregunta" (click)="pedirRetirarGrupo(grupo)">
-                  <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
-                    <path d="M14 2v4a2 2 0 0 0 2 2h4" />
-                    <path d="m14.5 12.5-5 5" />
-                    <path d="m9.5 12.5 5 5" />
-                  </svg>
-                </button>
-              </header>
-              @if (!grupo.filas.length) {
-                <p class="vacio-grupo">Cuando alguien responda, el video aparece aquí.</p>
-              } @else {
-                <div class="tabla">
-                  <div class="tabla-cabeza">
-                    <span>#</span>
-                    <span>Video</span>
-                    <span>Estudiante</span>
-                    <span>Estado</span>
-                    <span>Avisos</span>
-                    <span>Duración</span>
-                    <span></span>
+          <button class="panel-crear" type="button" (click)="empezarCreacion()">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            Crear pregunta
+          </button>
+        </header>
+        <section class="panel-kpis" aria-label="Resumen">
+          <article class="kpi">
+            <span class="kpi-icono">
+              <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="10" /></svg>
+            </span>
+            <div>
+              <p>Preguntas</p>
+              <strong>{{ resumen.preguntas }}</strong>
+              <small>{{ resumen.activas === 1 ? '1 activa' : resumen.activas + ' activas' }}</small>
+            </div>
+          </article>
+          <article class="kpi">
+            <span class="kpi-icono">
+              <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5" /><rect x="2" y="6" width="14" height="12" rx="2" /></svg>
+            </span>
+            <div>
+              <p>Respuestas</p>
+              <strong>{{ resumen.respuestas }}</strong>
+              <small>{{ resumen.conVideo === 1 ? '1 con video' : resumen.conVideo + ' con video' }}</small>
+            </div>
+          </article>
+          <article class="kpi" [class.kpi-atencion]="resumen.sinVer > 0">
+            <span class="kpi-icono">
+              <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" /><circle cx="12" cy="12" r="3" /></svg>
+            </span>
+            <div>
+              <p>Sin revisar</p>
+              <strong>{{ resumen.sinVer }}</strong>
+              <small>{{ resumen.sinVer ? 'Pendientes de ver' : 'Todo al día' }}</small>
+            </div>
+          </article>
+          <article class="kpi" [class.kpi-alerta]="resumen.alertas > 0">
+            <span class="kpi-icono">
+              <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /><path d="M12 9v4" /><path d="M12 17h.01" /></svg>
+            </span>
+            <div>
+              <p>Con avisos</p>
+              <strong>{{ resumen.alertas }}</strong>
+              <small>{{ resumen.alertas ? 'Revisa estos intentos' : 'Sin avisos graves' }}</small>
+            </div>
+          </article>
+        </section>
+        <section class="gestion preguntas-panel">
+          @let grupos = gruposVisibles();
+          @let grupo = grupoActivo();
+          <aside class="preguntas-columna" aria-label="Mis preguntas">
+            <div class="columna-cabeza">
+              <h2>Mis preguntas</h2>
+              <span class="contador">{{ grupos.length }}</span>
+            </div>
+            <label class="buscador">
+              <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+              <input type="search" aria-label="Buscar preguntas por código o contenido"
+                placeholder="Buscar código o pregunta" [value]="filtro()" (input)="filtro.set(texto($event))" />
+            </label>
+            <div class="preguntas-listado">
+              @for (item of grupos; track item.codigoPlano) {
+                @let nuevos = sinVer(item);
+                <div class="pregunta-item" [class.seleccionada]="grupo?.codigoPlano === item.codigoPlano">
+                  <button type="button" class="pregunta-seleccion" (click)="seleccionarPregunta(item.codigoPlano)"
+                    [attr.aria-pressed]="grupo?.codigoPlano === item.codigoPlano">
+                    <span class="pregunta-codigo">
+                      <strong>{{ item.codigo }}</strong>
+                      @if (vencido(item)) {
+                        <em class="insignia gris">Vencido</em>
+                      } @else if (nuevos) {
+                        <em class="insignia">{{ nuevos }} sin ver</em>
+                      }
+                    </span>
+                    <span class="pregunta-texto">{{ item.pregunta }}</span>
+                    <span class="pregunta-pie">
+                      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5" /><rect x="2" y="6" width="14" height="12" rx="2" /></svg>
+                      {{ cuentaGrupo(item) }}
+                      <i aria-hidden="true">·</i>
+                      {{ item.minutos ? item.minutos + ' min' : 'Sin límite' }}
+                    </span>
+                  </button>
+                  <button class="pregunta-menu-boton" type="button" aria-label="Acciones de la pregunta"
+                    [attr.popovertarget]="'acciones-' + item.codigoPlano"
+                    (click)="ubicarMenu($event, acciones)">···</button>
+                  <div #acciones class="pregunta-menu-flotante" [id]="'acciones-' + item.codigoPlano" popover>
+                    <button type="button" (click)="acciones.hidePopover(); empezarEdicion(item)">Editar pregunta</button>
+                    <button type="button" (click)="acciones.hidePopover(); copiar(item.codigoPlano, 'lista')">Copiar código</button>
+                    <button type="button" (click)="acciones.hidePopover(); pedirRetirarGrupo(item)">Retirar pregunta</button>
                   </div>
-                  @for (fila of grupo.filas; track fila.id; let n = $index) {
-                    @let descarga = fila.id ? descargas()[fila.id] : undefined;
-                    @if (enWeb && fila.video && !descarga?.url && !descarga?.error) {
-                      <div class="descarga-fila" role="status">
-                        <span>{{ descarga ? 'Descargando el video' : 'En espera de descarga' }} · {{ fila.nombre }}</span>
-                        @if (descarga) {
-                          @if (descarga.progreso !== undefined) {
-                            <strong>{{ descarga.progreso }}%</strong>
-                          }
-                          <div
-                            class="descarga-pista"
-                            [class.indeterminada]="descarga.progreso === undefined"
-                            role="progressbar"
-                            aria-label="Descargando el video"
-                            [attr.aria-valuenow]="descarga.progreso ?? null"
-                          >
-                            <span [style.width.%]="descarga.progreso ?? 30"></span>
-                          </div>
-                        }
-                      </div>
-                    } @else {
-                    <div class="respuesta" [class.quiet]="!fila.video" [class.descarga-lista]="descarga?.url" (click)="abrir(fila)">
-                      <span class="num">{{ n + 1 }}</span>
-                      <span class="miniatura" [class.espera]="!enWeb && fila.video && !visto(fila.id)">
-                        @if (descarga?.url; as url) {
-                          <video class="cuadro" muted playsinline preload="auto" [src]="url"></video>
-                        } @else if (!enWeb && fila.video && fila.id) {
-                          <video
-                            class="cuadro"
-                            muted
-                            playsinline
-                            preload="metadata"
-                            [src]="'/api/intentos/' + fila.id + '/video'"
-                            (loadeddata)="cuadro($event, fila.id)"
-                          ></video>
-                          @if (!visto(fila.id)) {
-                            <span class="mini-carga">Cargando</span>
-                          }
-                        } @else {
-                          <svg class="ico tenue" viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5" />
-                            <rect x="2" y="6" width="14" height="12" rx="2" />
-                          </svg>
-                        }
-                      </span>
-                      <span>
-                        <span class="nombre-fila">{{ fila.nombre }}</span>
-                        @if (fila.materia || fila.semestre) {
-                          <small class="datos-fila">
-                            {{ fila.materia }}@if (fila.materia && fila.semestre) { · }@if (fila.semestre) { Sem. {{ fila.semestre }} }
-                          </small>
-                        }
-                        <small class="datos-fila">
-                          @if (fila.profesor) { Prof. {{ fila.profesor }} · }{{ fila.cuando }}
-                        </small>
-                        @if (descarga?.error) {
-                          <button class="descarga-boton" type="button" (click)="$event.stopPropagation(); abrir(fila)">
-                            Reintentar descarga
-                          </button>
-                        }
-                      </span>
-                      <span class="estado-rev" [class.visto]="fila.revision !== 'nueva'">
-                        {{ fila.revision === 'nueva' ? 'Sin ver' : 'Visto' }}
-                      </span>
-                      <span class="marcas">
-                        @for (marca of fila.marcas; track marca) {
-                          <span class="etiqueta" [class.grave]="esGrave(marca)">{{ textoMarca(marca) }}</span>
-                        } @empty {
-                          <span class="sin-dato">—</span>
-                        }
-                      </span>
-                      <span class="col">{{ fila.duracion }}</span>
-                      <span class="fila-acciones" (click)="$event.stopPropagation()">
-                        @if (fila.id) {
-                          <button class="borrar-fila" type="button" aria-label="Eliminar intento" (click)="pedirBorrar(fila)">
-                            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
-                              <path d="M3 6h18" />
-                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-                              <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                              <line x1="10" x2="10" y1="11" y2="17" />
-                              <line x1="14" x2="14" y1="11" y2="17" />
-                            </svg>
-                          </button>
-                        }
-                      </span>
-                    </div>
-                    }
+                </div>
+              } @empty {
+                <div class="lista-vacia">
+                  <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><path d="M12 17h.01" /><circle cx="12" cy="12" r="10" /></svg>
+                  <p>{{ filtro() ? 'No hay coincidencias.' : 'Todavía no hay preguntas.' }}</p>
+                  @if (!filtro()) {
+                    <button type="button" (click)="empezarCreacion()">Crear la primera</button>
                   }
                 </div>
               }
-            </section>
-          }
+            </div>
+          </aside>
+          <div class="preguntas-detalle">
+            @if (grupo) {
+              @let nuevosGrupo = sinVer(grupo);
+              <header class="pregunta-detalle-cabecera">
+                <div class="detalle-titulo">
+                  <span class="detalle-etiqueta">Código</span>
+                  <div class="detalle-codigo">
+                    <h2>{{ grupo.codigo }}</h2>
+                    <span class="estado-codigo" [class.vencido]="vencido(grupo)">{{ vencido(grupo) ? 'Vencido' : 'Activo' }}</span>
+                  </div>
+                </div>
+                <div class="pregunta-acciones">
+                  <button type="button" class="accion" (click)="empezarEdicion(grupo)">
+                    <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /></svg>
+                    Editar
+                  </button>
+                  <button type="button" class="accion" (click)="copiar(grupo.codigoPlano, 'lista')">
+                    <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></svg>
+                    Copiar código
+                  </button>
+                  <button type="button" class="accion principal" (click)="copiar(enlaceEntrar, 'lista')">
+                    <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
+                    Copiar enlace
+                  </button>
+                </div>
+              </header>
+              <div class="pregunta-completa">
+                <span class="detalle-etiqueta">Pregunta</span>
+                <p>{{ grupo.pregunta }}</p>
+              </div>
+              <div class="pregunta-metadatos">
+                <span>
+                  <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>
+                  {{ grupo.minutos ? 'Hasta ' + grupo.minutos + ' min' : 'Sin límite de tiempo' }}
+                </span>
+                @if (grupo.vence) {
+                  <span [class.dato-vencido]="vencido(grupo)">
+                    <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect width="18" height="18" x="3" y="4" rx="2" /><path d="M16 2v4M8 2v4M3 10h18" /></svg>
+                    {{ vencido(grupo) ? 'Venció el ' : 'Vence el ' }}{{ fechaCompleta(grupo.vence) }}
+                  </span>
+                }
+                <span>
+                  <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" /></svg>
+                  {{ cuentaGrupo(grupo) }}
+                </span>
+                @if (nuevosGrupo) {
+                  <span class="dato-nuevo">{{ nuevosGrupo }} sin ver</span>
+                }
+              </div>
+              <header class="videos-cabecera">
+                <h3>Respuestas</h3>
+                <span>{{ filasVisibles().length }} de {{ grupo.filas.length }}</span>
+              </header>
+              <div class="respuestas-filtros">
+                <label class="buscador">
+                  <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+                  <input type="search" aria-label="Buscar estudiante" placeholder="Buscar estudiante"
+                    [value]="filtroEstudiante()" (input)="filtroEstudiante.set(texto($event))" />
+                </label>
+                <div class="segmentos" role="group" aria-label="Estado de visualización">
+                  <button type="button" [attr.aria-pressed]="estadoFiltro() === 'todos'" (click)="estadoFiltro.set('todos')">Todas</button>
+                  <button type="button" [attr.aria-pressed]="estadoFiltro() === 'nuevos'" (click)="estadoFiltro.set('nuevos')">Sin ver</button>
+                  <button type="button" [attr.aria-pressed]="estadoFiltro() === 'vistos'" (click)="estadoFiltro.set('vistos')">Vistas</button>
+                </div>
+                <select aria-label="Orden de respuestas" [value]="orden()" (change)="orden.set(valor($event))">
+                  <option value="recientes">Más recientes</option><option value="antiguos">Más antiguos</option>
+                </select>
+                  <div class="panel-vistas" aria-label="Vista de videos">
+                    <button type="button" aria-label="Cuadrícula" [attr.aria-pressed]="vista() === 'cuadricula'" (click)="vista.set('cuadricula')">
+                      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                    </button>
+                    <button type="button" aria-label="Lista" [attr.aria-pressed]="vista() === 'lista'" (click)="vista.set('lista')">
+                      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+                    </button>
+                  </div>
+              </div>
+              <div class="respuestas-layout" [class.respuestas-lista]="vista() === 'lista'">
+                @for (fila of filasVisibles(); track fila.id) {
+                  @let descarga = fila.id ? descargas()[fila.id] : undefined;
+                  @let url = descarga?.url || (!enWeb && fila.video ? '/api/intentos/' + fila.id + '/video' : '');
+                  <article class="respuesta-item" [class.respuesta-reproducible]="!!url" (click)="url && abrir(fila)">
+                      <div class="respuesta-media">
+                        @if (url) {
+                          <video muted playsinline preload="auto" [src]="url" (loadeddata)="cuadro($event)"></video>
+                          <button type="button" class="respuesta-play" [attr.aria-label]="'Reproducir video de ' + fila.nombre">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 11 7-11 7z" /></svg>
+                          </button>
+                          <span class="respuesta-tiempo">{{ fila.duracion }}</span>
+                        } @else if (fila.video && !descarga?.error) {
+                          <div class="respuesta-descarga">
+                            <span>{{ descarga ? 'Descargando el video' : 'En espera de descarga' }}</span>
+                            @if (descarga) {
+                              <div class="descarga-pista" role="progressbar" aria-label="Descargando el video"
+                                [class.indeterminada]="descarga.progreso === undefined" [attr.aria-valuenow]="descarga.progreso ?? null">
+                                <span [style.width.%]="descarga.progreso ?? 0"></span>
+                              </div>
+                              @if (descarga.progreso !== undefined) { <small>{{ descarga.progreso }}%</small> }
+                            }
+                          </div>
+                        } @else if (descarga?.error) {
+                          <button type="button" class="descarga-boton" (click)="abrir(fila)">Reintentar descarga</button>
+                        } @else {
+                          <span class="respuesta-sin-video">
+                            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="3"/><path d="m16 10 5-3v10l-5-3"/></svg>
+                            Sin grabación disponible
+                          </span>
+                        }
+                      </div>
+                    <div class="respuesta-detalle">
+                      <div class="respuesta-persona">
+                        <span class="avatar" aria-hidden="true">{{ iniciales(fila.nombre) }}</span>
+                        <div>
+                          <h3>{{ fila.nombre }}</h3>
+                          <p>{{ fila.fecha ? fechaCompleta(fila.fecha) : fila.cuando }}</p>
+                        </div>
+                      </div>
+                      @if (fila.materia || fila.semestre || fila.profesor) {
+                        <p class="respuesta-curso">
+                          {{ fila.materia }}@if (fila.materia && fila.semestre) { · }@if (fila.semestre) { Sem. {{ fila.semestre }} }@if (fila.profesor && (fila.materia || fila.semestre)) { · }@if (fila.profesor) { Prof. {{ fila.profesor }} }
+                        </p>
+                      }
+                      <div class="respuesta-etiquetas">
+                        <span class="estado-rev" [class.visto]="fila.revision !== 'nueva'">{{ fila.revision === 'nueva' ? 'Sin ver' : 'Visto' }}</span>
+                        @for (marca of fila.marcas; track marca) {
+                          <span class="etiqueta" [class.grave]="esGrave(marca)">{{ textoMarca(marca) }}</span>
+                        }
+                      </div>
+                    </div>
+                    <details class="panel-menu respuesta-menu" (click)="$event.stopPropagation()">
+                      <summary [attr.aria-label]="'Acciones de ' + fila.nombre">···</summary>
+                      <div>
+                        <button type="button" (click)="cerrarMenu($event); pedirBorrar(fila)">Eliminar intento</button>
+                      </div>
+                    </details>
+                  </article>
+                } @empty {
+                  <div class="respuestas-vacio">
+                    <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5" /><rect x="2" y="6" width="14" height="12" rx="2" /></svg>
+                    <strong>{{ grupo.filas.length ? 'Nada coincide con los filtros' : 'Todavía no hay respuestas' }}</strong>
+                    <p>{{ grupo.filas.length ? 'Prueba con otro nombre o cambia el estado.' : 'Comparte el código o el enlace. Cuando alguien responda, el video aparece aquí.' }}</p>
+                  </div>
+                }
+              </div>
+            } @else {
+              <div class="detalle-vacio">
+                <span class="kpi-icono">
+                  <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+                </span>
+                @if (filtro()) {
+                  <h2>Ninguna pregunta coincide</h2>
+                  <p>Revisa el código o busca otra palabra de la pregunta.</p>
+                } @else {
+                  <h2>Crea tu primera pregunta</h2>
+                  <p>Escribe la pregunta, elige el tiempo y comparte el código con tus estudiantes.</p>
+                  <button class="panel-crear" type="button" (click)="empezarCreacion()">Crear pregunta</button>
+                }
+              </div>
+            }
+          </div>
         </section>
+        </div>
         @if (creando()) {
           <div class="velo" (click)="cerrarCreacion()">
-            <div class="hoja" role="dialog" aria-modal="true" (click)="$event.stopPropagation()">
+            <div class="hoja docente-modal" role="dialog" aria-modal="true" aria-labelledby="docente-modal-titulo" (click)="$event.stopPropagation()">
               <button class="cerrar-hoja" type="button" (click)="cerrarCreacion()" aria-label="Cerrar">
                 <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M18 6 6 18" />
@@ -239,13 +353,16 @@ interface Grupo {
                 </svg>
               </button>
               @if (codigoNuevo(); as codigo) {
-                <h2>Listo para compartir</h2>
-                <p class="hoja-ayuda">Pasa el código y el enlace. El estudiante entra y responde en voz.</p>
-                <div class="casillas">
-                  @for (letra of codigo.split(''); track $index) {
-                    <span class="casilla">{{ letra }}</span>
-                  }
+                <header class="docente-modal-cabecera">
+                  <h2 id="docente-modal-titulo">Código listo para compartir</h2>
+                  <p class="hoja-ayuda">Comparte el código y el enlace de acceso con tus estudiantes.</p>
+                </header>
+                <div class="docente-codigo">
+                  <span>Código de la evaluación</span>
+                  <strong>{{ codigo.slice(0, 4) }} {{ codigo.slice(4) }}</strong>
                 </div>
+                <p class="docente-enlace">{{ enlaceEntrar }}</p>
+                <div class="docente-modal-acciones">
                 <button class="generar" type="button" (click)="copiar(codigo, 'codigo')">
                   <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
                     <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
@@ -253,7 +370,6 @@ interface Grupo {
                   </svg>
                   {{ avisoCopia() === 'codigo' ? 'Copiado' : 'Copiar código' }}
                 </button>
-                <p class="enlace">{{ enlaceEntrar }}</p>
                 <button class="generar suave" type="button" (click)="copiar(enlaceEntrar, 'enlace')">
                   <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
                     <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
@@ -261,9 +377,10 @@ interface Grupo {
                   </svg>
                   {{ avisoCopia() === 'enlace' ? 'Copiado' : 'Copiar enlace' }}
                 </button>
+                </div>
               } @else if (editando()) {
                 <form (submit)="guardarEdicion($event)">
-                  <h2>Editar pregunta</h2>
+                  <h2 id="docente-modal-titulo">Editar pregunta</h2>
                   <p class="hoja-ayuda">El código sigue igual. Quien entre después ve este texto.</p>
                   @if (errorCrear()) {
                     <p class="fallo">{{ errorCrear() }}</p>
@@ -280,8 +397,9 @@ interface Grupo {
                 </form>
               } @else {
                 <form (submit)="generar($event)">
-                  <h2>Nueva pregunta</h2>
-                  <p class="hoja-ayuda">Una sola pregunta. El video de la cara y la voz es la respuesta.</p>
+                  <header class="docente-modal-cabecera">
+                    <h2 id="docente-modal-titulo">Nueva pregunta</h2>
+                  </header>
                   @if (errorCrear()) {
                     <p class="fallo">{{ errorCrear() }}</p>
                   }
@@ -294,14 +412,16 @@ interface Grupo {
                       (input)="preguntaNueva.set(texto($event))"
                     ></textarea>
                   </label>
+                  <div class="docente-configuracion">
                   <div class="campo">
-                    <span>Duración</span>
+                    <span>Duración máxima</span>
                     <div class="tiempos">
                       @for (opcion of sugeridos; track opcion.valor) {
                         <button
                           class="tiempo"
                           type="button"
                           [class.activa]="chipActivo(opcion.valor)"
+                          [attr.aria-pressed]="chipActivo(opcion.valor)"
                           (click)="elegirTiempo(opcion.valor)"
                         >
                           {{ opcion.etiqueta }}
@@ -322,7 +442,34 @@ interface Grupo {
                       <span>min</span>
                     </label>
                   </div>
-                  <button class="generar" type="submit" [disabled]="enviandoCrear()">Generar código</button>
+                  @if (panel()?.vencimientoCodigos) {
+                    <div class="docente-vigencia">
+                    <label class="panel-vencimiento">
+                      <input type="checkbox" [checked]="activarVencimiento()" (change)="cambiarVencimiento($event)" />
+                      Activar vencimiento del código
+                    </label>
+                    @if (activarVencimiento()) {
+                      <div class="docente-vigencia-tiempo">
+                        <label class="campo">
+                          <span>Tiempo activo</span>
+                          <input type="number" min="1" [max]="unidadVencimiento() === 'dias' ? 365 : 8760" step="1" required
+                            [value]="cantidadVencimiento()" (input)="cantidadVencimiento.set(valor($event))" />
+                        </label>
+                        <label class="campo">
+                          <span>Unidad</span>
+                          <select [value]="unidadVencimiento()" (change)="unidadVencimiento.set(valor($event))">
+                            <option value="dias">Días</option><option value="horas">Horas</option>
+                          </select>
+                        </label>
+                      </div>
+                    }
+                    </div>
+                  }
+                  </div>
+                  <div class="docente-modal-acciones">
+                    <button class="generar suave" type="button" (click)="cerrarCreacion()" [disabled]="enviandoCrear()">Cancelar</button>
+                    <button class="generar" type="submit" [disabled]="enviandoCrear()">{{ enviandoCrear() ? 'Creando…' : 'Generar código' }}</button>
+                  </div>
                 </form>
               }
             </div>
@@ -330,26 +477,26 @@ interface Grupo {
         }
         @if (confirmar(); as pedido) {
           <div class="velo" (click)="confirmar.set(null)">
-            <div class="hoja" role="dialog" aria-modal="true" (click)="$event.stopPropagation()">
+            <div class="hoja" role="dialog" aria-modal="true" aria-labelledby="titulo-retirar" (click)="$event.stopPropagation()">
               <button class="cerrar-hoja" type="button" (click)="confirmar.set(null)" aria-label="Cerrar">
                 <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M18 6 6 18" />
                   <path d="m6 6 12 12" />
                 </svg>
               </button>
-              <h2>{{ pedido.tipo === 'video' ? 'Eliminar intento' : 'Retirar pregunta' }}</h2>
+              <h2 id="titulo-retirar">{{ pedido.tipo === 'video' ? 'Eliminar intento' : '¿Retirar esta pregunta?' }}</h2>
               <p class="hoja-ayuda">
                 {{ pedido.tipo === 'video'
                   ? 'Se borra la respuesta de ' + pedido.fila.nombre + '. La pregunta sigue.'
-                  : 'Se retira esta pregunta y todos sus videos.' }}
+                  : 'Se borrarán la pregunta, todos los intentos y sus videos. Esta acción no se puede deshacer desde SiVI.' }}
               </p>
               @if (errorBorrar()) {
                 <p class="fallo">{{ errorBorrar() }}</p>
               }
               <div class="hoja-acciones">
                 <button class="generar suave" type="button" (click)="confirmar.set(null)">Cancelar</button>
-                <button class="generar" type="button" (click)="confirmarAccion()">
-                  {{ pedido.tipo === 'video' ? 'Eliminar' : 'Retirar' }}
+                <button class="generar" type="button" [disabled]="enviandoBorrar()" (click)="confirmarAccion()">
+                  {{ pedido.tipo === 'video' ? 'Eliminar' : 'Sí, retirar y borrar' }}
                 </button>
               </div>
             </div>
@@ -364,6 +511,14 @@ interface Grupo {
             (cerrar)="cerrar()"
           />
         }
+        @if (enviandoBorrar()) {
+          <div class="aviso-ancla">
+            <p class="aviso-flotante" role="status">
+              <span class="aviso-carga" aria-hidden="true"></span>
+              Eliminando los videos…
+            </p>
+          </div>
+        } @else {
         @for (item of avisos(); track item.id) {
           <div class="aviso-ancla">
             <p class="aviso-flotante" role="status">
@@ -374,72 +529,65 @@ interface Grupo {
             </p>
           </div>
         }
+        }
       </app-marco>
     } @else {
-      <section class="puerta">
-        <div class="puerta-arte">
-          <p class="puerta-marca"><app-marca />SiVI</p>
-          <svg class="puerta-dibujo" viewBox="0 0 440 420" fill="none" aria-hidden="true">
-            <rect x="28" y="36" width="248" height="176" rx="28" stroke="#fff" stroke-width="2" />
-            <circle cx="152" cy="112" r="38" stroke="#fff" stroke-width="2" />
-            <circle cx="138" cy="104" r="3" fill="#fff" />
-            <circle cx="166" cy="104" r="3" fill="#fff" />
-            <path d="M136 122c8 10 24 10 32 0" stroke="#fff" stroke-width="2" stroke-linecap="round" />
-            <path stroke="#fff" stroke-width="3" stroke-linecap="round" d="M36 268v24M56 252v56M76 274v12M96 242v76M116 262v36M136 232v96M156 258v44M176 246v68M196 272v16M216 254v52M236 266v28" />
-            <path fill="#fff" fill-rule="evenodd" d="M338 64 412 196H264L338 64zm0 46 16 36h-32l16-36z" />
-            <circle cx="338" cy="292" r="52" stroke="#fff" stroke-width="2" />
-            <circle cx="338" cy="292" r="8" fill="#fff" />
-            <circle cx="78" cy="372" r="7" fill="#fff" />
-            <circle cx="104" cy="388" r="3.5" fill="#fff" opacity=".55" />
-            <circle cx="392" cy="360" r="4" fill="#fff" opacity=".7" />
-          </svg>
-          <p class="puerta-frase">Una pregunta, en voz.</p>
-        </div>
-        <div class="puerta-lado">
-          <p class="puerta-kicker">Para profesores</p>
-          <h1>{{ alta() ? 'Crear cuenta' : 'Entrar' }}</h1>
-          <p class="lede">
+      <main class="puerta acceso-docente">
+        <app-marca variante="contorno" />
+        <section class="acceso-docente-contenido" aria-labelledby="acceso-docente-titulo">
+          <header class="acceso-docente-cabecera">
+          <h1 id="acceso-docente-titulo">{{ alta() ? 'Crear cuenta docente' : 'Acceso docente' }}</h1>
+          <p>
             {{ alta()
-              ? 'Cada profesor ve solo sus preguntas y los videos de sus códigos.'
-              : 'Aquí se crean las preguntas y se revisan las respuestas.' }}
+              ? 'Regístrate para crear evaluaciones y revisar las respuestas de tus estudiantes.'
+              : 'Inicia sesión para gestionar tus preguntas y revisar las respuestas.' }}
           </p>
-          <form class="form" (submit)="enviar($event)">
+          </header>
+          <form class="acceso-docente-form" (submit)="enviar($event)">
             @if (error()) {
-              <p class="error">{{ error() }}</p>
+              <p class="acceso-docente-error" role="alert">{{ error() }}</p>
             }
             @if (alta()) {
               <label>
                 <span>Nombre</span>
-                <input name="nombre" autocomplete="name" required [value]="nombre()" (input)="nombre.set(valor($event))" />
+                <input name="nombre" autocomplete="name" placeholder="Nombre completo" required [value]="nombre()" (input)="nombre.set(valor($event))" />
               </label>
             }
             <label>
               <span>{{ enWeb ? 'Correo' : 'Usuario' }}</span>
-              <input name="usuario" [type]="enWeb ? 'email' : 'text'" autocomplete="username" required [value]="usuario()" (input)="alUsuario($event)" />
+              <input name="usuario" [type]="enWeb ? 'email' : 'text'" autocomplete="username"
+                [placeholder]="enWeb ? 'nombre@ejemplo.com' : 'Tu usuario'" required [value]="usuario()" (input)="alUsuario($event)" />
             </label>
             <label>
-              <span>Clave</span>
+              <span>Contraseña</span>
               <input
                 name="clave"
                 type="password"
                 [attr.minlength]="enWeb ? 6 : 4"
                 required
+                [placeholder]="alta() ? (enWeb ? 'Mínimo 6 caracteres' : 'Mínimo 4 caracteres') : 'Tu contraseña'"
                 [attr.autocomplete]="alta() ? 'new-password' : 'current-password'"
                 [value]="clave()"
                 (input)="clave.set(valor($event))"
               />
             </label>
-            <div class="acciones">
-              <button class="btn solid" type="submit" [disabled]="enviando()">
+            <button class="btn solid" type="submit" [disabled]="enviando()" [attr.aria-busy]="enviando()">
+              @if (enviando()) {
+                <span class="aviso-carga" aria-hidden="true"></span>
+                {{ alta() ? 'Creando cuenta…' : 'Entrando…' }}
+              } @else {
                 {{ alta() ? 'Crear cuenta' : 'Entrar' }}
-              </button>
-              <button class="btn ghost" type="button" (click)="cambiar()">
-                {{ alta() ? 'Ya tengo cuenta' : 'Crear cuenta' }}
-              </button>
-            </div>
+              }
+            </button>
           </form>
-        </div>
-      </section>
+          <div class="acceso-docente-alternar">
+            <span>{{ alta() ? '¿Ya tienes cuenta?' : '¿Es tu primera vez?' }}</span>
+            <button type="button" (click)="cambiar()" [disabled]="enviando()">
+              {{ alta() ? 'Iniciar sesión' : 'Crear cuenta' }}
+            </button>
+          </div>
+        </section>
+      </main>
     }
   `,
 })
@@ -450,6 +598,7 @@ export class Profesor implements OnDestroy {
   private timer = 0;
 
   readonly cargando = signal(true);
+  readonly errorPanel = signal(false);
   readonly panel = signal<Panel | null>(null);
   readonly alta = signal(false);
   readonly error = signal('');
@@ -485,8 +634,32 @@ export class Profesor implements OnDestroy {
   readonly errorBorrar = signal('');
   readonly enviandoBorrar = signal(false);
   readonly enlaceEntrar = location.origin + '/entrar';
+  readonly rutaDocente = '/' + RUTA_DOCENTE;
   readonly filtro = signal('');
-  readonly posters = signal<Record<string, boolean>>({});
+  readonly filtroEstudiante = signal('');
+  readonly estadoFiltro = signal('todos');
+  readonly orden = signal('recientes');
+  readonly vista = signal<'cuadricula' | 'lista'>('cuadricula');
+  readonly seleccion = signal<string | null>(null);
+  readonly activarVencimiento = signal(false);
+  readonly cantidadVencimiento = signal('1');
+  readonly unidadVencimiento = signal('dias');
+  readonly gruposVisibles = computed(() => {
+    const panel = this.panel();
+    return panel ? this.grupos(panel) : [];
+  });
+  readonly grupoActivo = computed(() =>
+    this.gruposVisibles().find(grupo => grupo.codigoPlano === this.seleccion()) ?? this.gruposVisibles()[0],
+  );
+  readonly filasVisibles = computed(() => {
+    const busca = this.filtroEstudiante().trim().toLocaleLowerCase();
+    const estado = this.estadoFiltro();
+    const direccion = this.orden() === 'antiguos' ? 1 : -1;
+    return (this.grupoActivo()?.filas ?? [])
+      .filter(fila => fila.nombre.toLocaleLowerCase().includes(busca) &&
+        (estado === 'todos' || (estado === 'nuevos') === (fila.revision === 'nueva')))
+      .sort((a, b) => direccion * ((a.fecha ?? 0) - (b.fecha ?? 0)));
+  });
   private chipTimer = 0;
   private borrarTimer = 0;
   private chipId = 0;
@@ -502,6 +675,7 @@ export class Profesor implements OnDestroy {
       if (this.panel()) void this.cargar(false);
     }, this.enWeb ? 10000 : 4000);
   }
+
 
   ngOnDestroy() {
     this.destruido = true;
@@ -541,6 +715,7 @@ export class Profesor implements OnDestroy {
           semestre: intento.semestre,
           materia: intento.materia,
           cuando: hace(intento.inicio, this.api.now()),
+          fecha: intento.enviado ?? intento.inicio ?? intento.creado,
           codigo: formatoCodigo(examen.codigo),
           codigoPlano: examen.codigo,
           pregunta: examen.pregunta,
@@ -556,22 +731,89 @@ export class Profesor implements OnDestroy {
           revision: intento.revision || 'nueva',
         }));
       const texto = (examen.codigo + ' ' + formatoCodigo(examen.codigo) + ' ' + examen.pregunta).toLocaleLowerCase();
-      const porNombre = filas.filter((fila) => fila.nombre.toLocaleLowerCase().includes(busca));
-      if (busca && !texto.includes(busca) && !porNombre.length) continue;
+      if (busca && !texto.includes(busca)) continue;
       grupos.push({
         codigo: formatoCodigo(examen.codigo),
         codigoPlano: examen.codigo,
         pregunta: examen.pregunta,
-        filas: busca && !texto.includes(busca) ? porNombre : filas,
+        minutos: examen.minutos,
+        vence: examen.vence,
+        filas,
       });
     }
     return grupos;
+  }
+
+  readonly estadisticas = computed(() => {
+    const ocultos = new Set(this.ocultos());
+    const preguntas = new Set(this.preguntasOcultas());
+    const examenes = (this.panel()?.examenes ?? []).filter((examen) => !preguntas.has(examen.codigo));
+    const intentos = examenes.flatMap((examen) => examen.intentos).filter((intento) => !ocultos.has(intento.id));
+    const ahora = this.api.now();
+    return {
+      preguntas: examenes.length,
+      activas: examenes.filter((examen) => !examen.vence || examen.vence > ahora).length,
+      respuestas: intentos.length,
+      conVideo: intentos.filter((intento) => intento.trozos > 0 && !intento.videoEliminado).length,
+      sinVer: intentos.filter((intento) => (intento.revision || 'nueva') === 'nueva').length,
+      alertas: intentos.filter((intento) => (intento.marcas ?? []).some((marca) => this.esGrave(marca))).length,
+    };
+  });
+
+  sinVer(grupo: Grupo) {
+    return grupo.filas.filter((fila) => fila.revision === 'nueva').length;
+  }
+
+  vencido(grupo: Grupo) {
+    return !!grupo.vence && grupo.vence <= this.api.now();
+  }
+
+  primerNombre(nombre: string) {
+    return nombre.trim().split(/\s+/)[0] || 'docente';
+  }
+
+  iniciales(nombre: string) {
+    const partes = nombre.trim().split(/\s+/).filter(Boolean);
+    const letras = partes.length > 1 ? partes[0][0] + partes[partes.length - 1][0] : (partes[0] ?? '?').slice(0, 2);
+    return letras.toLocaleUpperCase();
   }
 
   cuentaGrupo(grupo: Grupo) {
     const n = grupo.filas.length;
     if (!n) return 'Sin respuestas';
     return n === 1 ? '1 respuesta' : n + ' respuestas';
+  }
+
+  seleccionarPregunta(codigo: string) {
+    this.seleccion.set(codigo);
+    this.filtroEstudiante.set('');
+    this.estadoFiltro.set('todos');
+  }
+
+  cerrarMenu(event: Event) {
+    (event.currentTarget as HTMLElement).closest('details')?.removeAttribute('open');
+  }
+
+  ubicarMenu(event: Event, menu: HTMLElement) {
+    const boton = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const ancho = 184;
+    const debajo = boton.bottom + 4;
+    menu.style.left = Math.max(8, Math.min(innerWidth - ancho - 8, boton.right - ancho)) + 'px';
+    menu.style.top = debajo + 126 <= innerHeight ? debajo + 'px' : 'auto';
+    menu.style.bottom = debajo + 126 <= innerHeight ? 'auto' : Math.max(8, innerHeight - boton.top + 4) + 'px';
+  }
+
+  fechaCompleta(segundos: number) {
+    return new Intl.DateTimeFormat('es-CO', { dateStyle: 'medium', timeStyle: 'short' })
+      .format(new Date(segundos * 1000));
+  }
+
+  apiAhora() {
+    return this.api.now();
+  }
+
+  cambiarVencimiento(event: Event) {
+    this.activarVencimiento.set((event.target as HTMLInputElement).checked);
   }
 
   pedirRetirarGrupo(grupo: Grupo) {
@@ -612,7 +854,7 @@ export class Profesor implements OnDestroy {
         if (!control.signal.aborted) actualizar({ control, progreso });
       });
       if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 420));
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 640));
       }
       if (!control.signal.aborted) actualizar({ control, url: URL.createObjectURL(datos) });
     } catch {
@@ -661,6 +903,9 @@ export class Profesor implements OnDestroy {
     this.cerrar();
     this.preguntaNueva.set('');
     this.minutosNuevos.set(5);
+    this.activarVencimiento.set(false);
+    this.cantidadVencimiento.set('1');
+    this.unidadVencimiento.set('dias');
     this.otro.set('');
     this.codigoNuevo.set(null);
     this.editando.set(null);
@@ -742,7 +987,7 @@ export class Profesor implements OnDestroy {
 
   async confirmarAccion() {
     const pedido = this.confirmar();
-    if (!pedido) return;
+    if (!pedido || this.enviandoBorrar()) return;
     this.confirmar.set(null);
     if (this.pendiente) await this.cerrarPendiente();
     if (pedido.tipo === 'video') {
@@ -753,7 +998,8 @@ export class Profesor implements OnDestroy {
     } else {
       this.preguntasOcultas.update((codigos) => [...codigos, pedido.fila.codigoPlano]);
       this.pendiente = { tipo: 'pregunta', id: pedido.fila.codigoPlano };
-      this.mostrarAviso('Pregunta retirada', true);
+      await this.cerrarPendiente();
+      return;
     }
     window.clearTimeout(this.borrarTimer);
     this.borrarTimer = window.setTimeout(() => void this.cerrarPendiente(), 5000);
@@ -778,17 +1024,23 @@ export class Profesor implements OnDestroy {
     window.clearTimeout(this.borrarTimer);
     if (this.aviso()?.deshacer) this.aviso.set(null);
     if (!pendiente) return;
+    if (pendiente.tipo === 'pregunta') this.enviandoBorrar.set(true);
     try {
       if (pendiente.tipo === 'video') {
         await this.api.request('/api/profesor/intentos/' + pendiente.id, { method: 'DELETE' });
       } else {
         await this.api.request('/api/profesor/examenes/' + pendiente.id, { method: 'DELETE' });
+        this.panel.update(panel => panel && {
+          ...panel,
+          examenes: panel.examenes.filter(examen => examen.codigo !== pendiente.id),
+        });
       }
       await this.cargar(false);
       if (pendiente.tipo === 'video') {
         this.ocultos.update((ids) => ids.filter((id) => id !== pendiente.id));
       } else {
         this.preguntasOcultas.update((codigos) => codigos.filter((codigo) => codigo !== pendiente.id));
+        this.mostrarAviso('Pregunta y videos eliminados', false);
       }
     } catch (error) {
       if (pendiente.tipo === 'video') {
@@ -797,6 +1049,8 @@ export class Profesor implements OnDestroy {
         this.preguntasOcultas.update((codigos) => codigos.filter((codigo) => codigo !== pendiente.id));
       }
       this.mostrarAviso(error instanceof Error ? error.message : 'No se pudo eliminar', false);
+    } finally {
+      if (pendiente.tipo === 'pregunta') this.enviandoBorrar.set(false);
     }
   }
 
@@ -857,17 +1111,12 @@ export class Profesor implements OnDestroy {
     }, 2600);
   }
 
-  visto(id: string | null) {
-    return !!id && !!this.posters()[id];
-  }
-
-  cuadro(event: Event, id: string) {
+  cuadro(event: Event) {
     const video = event.target as HTMLVideoElement;
     video.pause();
     const fin = video.seekable.length ? video.seekable.end(video.seekable.length - 1) : 0;
     if (fin > 0.4 && !video.dataset['listo']) video.currentTime = Math.min(0.6, fin);
     video.dataset['listo'] = '1';
-    this.posters.update((mapa) => ({ ...mapa, [id]: true }));
   }
 
   esGrave(marca: string) {
@@ -887,14 +1136,21 @@ export class Profesor implements OnDestroy {
 
   async generar(event: Event) {
     event.preventDefault();
+    if (this.enviandoCrear()) return;
     this.enviandoCrear.set(true);
     this.errorCrear.set('');
     try {
       const data = await this.api.request<{ codigo: string }>('/api/profesor/examenes', {
         method: 'POST',
-        body: { pregunta: this.preguntaNueva(), minutos: this.minutosNuevos() },
+        body: {
+          pregunta: this.preguntaNueva(), minutos: this.minutosNuevos(),
+          ...(this.panel()?.vencimientoCodigos && this.activarVencimiento()
+            ? { vigenciaHoras: Number(this.cantidadVencimiento()) * (this.unidadVencimiento() === 'dias' ? 24 : 1) } : {}),
+        },
       });
       this.codigoNuevo.set(data.codigo);
+      this.filtro.set('');
+      this.seleccionarPregunta(data.codigo);
       await this.cargar(false);
     } catch (error) {
       this.errorCrear.set(error instanceof Error ? error.message : 'No se pudo crear');
@@ -933,9 +1189,16 @@ export class Profesor implements OnDestroy {
 
   async cargar(inicial: boolean) {
     const version = this.versionPanel;
-    if (inicial) this.cargando.set(true);
+    if (inicial) {
+      this.cargando.set(true);
+      this.errorPanel.set(false);
+    }
     try {
-      const panel = await this.api.request<Panel>('/api/profesor');
+      const mostrarTrazo = inicial && this.enviando() && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const [panel] = await Promise.all([
+        this.api.request<Panel>('/api/profesor'),
+        esperar(mostrarTrazo ? 1100 : 0),
+      ]);
       if (this.destruido || version !== this.versionPanel) return;
       const vigentes = new Set(panel.examenes.flatMap((examen) =>
         examen.intentos.filter((intento) => !intento.videoEliminado).map((intento) => intento.id)
@@ -946,8 +1209,11 @@ export class Profesor implements OnDestroy {
       if (retirados.length) this.limpiarDescargas(retirados);
       this.panel.set(panel);
       void this.descargarPendientes();
-    } catch {
-      if (inicial) this.panel.set(null);
+    } catch (error) {
+      if (inicial) {
+        this.panel.set(null);
+        this.errorPanel.set(servicioNoDisponible(error));
+      }
     } finally {
       if (inicial) this.cargando.set(false);
     }
@@ -970,6 +1236,7 @@ export class Profesor implements OnDestroy {
 
   async enviar(event: Event) {
     event.preventDefault();
+    if (this.enviando()) return;
     this.enviando.set(true);
     this.error.set('');
     try {
@@ -983,7 +1250,7 @@ export class Profesor implements OnDestroy {
       });
       this.clave.set('');
       await this.cargar(true);
-      await this.router.navigateByUrl('/profesor');
+      await this.router.navigateByUrl(this.rutaDocente);
     } catch (error) {
       this.error.set(error instanceof Error ? error.message : 'No se pudo entrar');
     } finally {
@@ -997,6 +1264,6 @@ export class Profesor implements OnDestroy {
     this.panel.set(null);
     this.limpiarDescargas();
     await this.api.request('/api/salir', { method: 'POST', body: {} }).catch(() => undefined);
-    await this.router.navigateByUrl('/profesor');
+    await this.router.navigateByUrl(this.rutaDocente);
   }
 }

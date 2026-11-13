@@ -1,0 +1,17 @@
+export const MATERIAS = [
+  'Técnicas para el aprendizaje en la modalidad virtual', 'Ética e introducción al derecho',
+  'Historia del derecho', 'Derecho civil personas', 'Teoría constitucional', 'Constitución política',
+  'Historia de las ideas políticas', 'Derecho civil bienes', 'Epistemología de las ciencias sociales y humanas',
+  'Teoría general del proceso', 'Criminología', 'Filosofía del derecho',
+  'Obligaciones', 'Hermenéutica jurídica', 'Laboral individual', 'Derecho procesal general', 'Teoría del delito',
+  'Derechos humanos y derecho internacional humanitario', 'Derecho de familia y menores',
+  'Seguridad social integral', 'Teoría de la argumentación jurídica',
+  'Derecho comercial general', 'Laboral colectivo', 'Resolución de conflictos', 'Derecho administrativo general',
+  'Penal especial', 'Títulos valores', 'Razonamiento cuantitativo', 'Derecho digital',
+  'Derecho procesal penal', 'Responsabilidad extracontractual del Estado',
+  'Contratación privada', 'Derecho laboral administrativo', 'Derecho probatorio', 'Procesal laboral',
+  'Derecho económico y bursátil', 'Sucesiones', 'Derecho disciplinario', 'Sociedades mercantiles',
+  'Notariado y registro', 'Derecho contencioso administrativo', 'Derecho tributario',
+  'Electiva de profundización I', 'Seminario de investigación', 'Procesos concursales',
+  'Electiva de profundización II', 'Derecho internacional', 'Práctica jurídica', 'Modalidad de grado',
+].sort((a, b) => a.localeCompare(b, 'es'));

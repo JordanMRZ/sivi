@@ -1,11 +1,19 @@
-import { Component } from '@angular/core';
+import { Component, computed, input } from '@angular/core';
+
+const LOGOS = {
+  principal: 'sivi-logo.svg',
+  contorno: 'sivi-logo-contorno.svg',
+  monocromatico: 'sivi-logo-monocromatico.svg',
+  carga: 'sivi-logo-trazo.svg',
+};
 
 @Component({
   selector: 'app-marca',
   template: `
-    <svg class="marca" viewBox="0 0 32 32" aria-hidden="true">
-      <path fill="currentColor" fill-rule="evenodd" d="M16 5 27 27H5L16 5zm0 9 3.2 7h-6.4L16 14z" />
-    </svg>
+    <img class="marca" [src]="archivo()" width="1268" height="699" alt="SiVI" />
   `,
 })
-export class Marca {}
+export class Marca {
+  readonly variante = input<keyof typeof LOGOS>('principal');
+  readonly archivo = computed(() => LOGOS[this.variante()]);
+}

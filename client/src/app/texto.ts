@@ -55,6 +55,7 @@ export function mensajeCorte(tipo: string) {
       fullscreen: 'La pregunta se cerró porque saliste de pantalla completa.',
       virtual: 'La cámara parece virtual.',
       hueco: 'Se cortó la grabación y la pregunta se cerró.',
+      supervision: 'Intento cerrado',
       tiempo: 'Se acabó el tiempo.',
       ok: 'Listo. El video quedó guardado.',
     }[tipo] ?? 'La pregunta se cerró.'

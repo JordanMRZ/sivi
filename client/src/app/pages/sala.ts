@@ -1,41 +1,203 @@
 import { Component, inject, OnDestroy, signal } from '@angular/core';
+import { NgTemplateOutlet } from '@angular/common';
 import { Title } from '@angular/platform-browser';
 import { Router, RouterLink } from '@angular/router';
-import { Api, SalaDto, TrozoDto } from '../api';
-import { Marco } from '../marco';
+import { Api, SalaDto, TrozoDto, servicioNoDisponible } from '../api';
+import { EstadoPagina } from '../estado-pagina';
 import { Marca } from '../marca';
 import { BARRAS, elegirMime, esperar, esVirtual, fmt, mensajeCorte, mensajeMedia, REGLAS } from '../texto';
 
-type Fase = 'carga' | 'camara' | 'examen' | 'fin' | 'error';
+type Fase = 'carga' | 'instrucciones' | 'camara' | 'examen' | 'fin' | 'error';
+
+const INSTRUCCIONES = [
+  {
+    etiqueta: 'Preparación',
+    titulo: 'Antes de empezar',
+    puntos: [
+      'Busca un lugar tranquilo, con buena luz y una conexión estable.',
+      'Permite el acceso a la cámara y al micrófono y comprueba que se te vea y se te escuche.',
+      'La pregunta se mostrará cuando el programa empiece a grabar. Si la evaluación tiene límite de tiempo, el contador empezará en ese momento.',
+    ],
+  },
+  {
+    etiqueta: 'Reglas',
+    titulo: 'Durante la evaluación',
+    puntos: [
+      {
+        texto: 'Mantén abierta la pestaña y la pantalla completa si el navegador la activó. No cambies de aplicación ni recargues la página',
+        advertencia: 'porque de lo contrario la actividad oral se cerrará de manera automática',
+      },
+      'Si SiVI detecta que sales de la evaluación o se apaga la cámara, cierra la pregunta y marca el intento para revisión. El intento marcado no se acepta como entrega válida.',
+      'Pulsa «Terminar y enviar» al acabar. Mantén la ventana abierta hasta que SiVI confirme que el video quedó guardado.',
+    ],
+  },
+  {
+    etiqueta: 'Problemas',
+    titulo: 'Si algo falla',
+    puntos: [
+      'Si se interrumpe la conexión, mantén abierta la página. SiVI intenta enviar de nuevo los segmentos que no se pudieron guardar.',
+      'Si la conexión no se recupera o SiVI indica que la grabación se cortó, la entrega puede quedar incompleta.',
+      'Si no ves la confirmación de guardado o el intento quedó cerrado, por favor realice captura(s) de pantalla, video(s), o cualquier otro soporte y/o material probatorio sobre su caso en particular donde se logre evidenciar que presentó una falla técnica.',
+    ],
+  },
+] as const;
 
 @Component({
   selector: 'app-sala',
-  imports: [Marco, RouterLink, Marca],
+  imports: [RouterLink, Marca, NgTemplateOutlet, EstadoPagina],
   template: `
+    <ng-template #avisoCamara>
+      <div class="sala-aviso-imagen" role="alert">
+        <div class="aviso-camara-icono" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="6" width="12" height="12" rx="3" /><path d="m15 10 6-3v10l-6-3M9 9v3m0 3h.01" /></svg>
+        </div>
+        <h2>La cámara se ve en negro</h2>
+        <p>Descubre la cámara o mejora la iluminación.
+          {{ fase() === 'camara' ? 'Podrás empezar cuando la imagen sea visible.' : 'La pregunta volverá a aparecer cuando la imagen sea visible.' }}
+        </p>
+      </div>
+    </ng-template>
+    <ng-template #plazos>
+      <ul class="plazos-grabacion">
+        <li>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><path d="M12 8v4l3 2" /></svg>
+          <div><strong>8 días hábiles</strong><span>El docente tiene este plazo para calificar desde el envío.</span></div>
+        </li>
+        <li>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V4h6v3m2 0-1 13H8L7 7m3 4v5m4-5v5" /></svg>
+          <div><strong>20 días calendario</strong><span>La grabación se elimina al vencer este plazo.</span></div>
+        </li>
+      </ul>
+    </ng-template>
+    <ng-template #graficoEntrega let-estado>
+    <div class="entrega-ilustracion" aria-hidden="true">
+      <svg viewBox="0 0 128 92" fill="none">
+        <rect x="12" y="17" width="88" height="61" rx="15" fill="#eaddfa" />
+        <rect x="23" y="9" width="88" height="61" rx="15" fill="#faf8ff" stroke="#8b3dff" stroke-width="2" />
+        <path d="M58 27v25l19-12.5L58 27Z" fill="#8b3dff" />
+        <circle cx="100" cy="68" r="21" fill="#2a0a4e" stroke="#faf8ff" stroke-width="3" />
+        @if (estado === 'completo') {
+          <path d="m90 68 7 7 13-14" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+        } @else if (estado === 'cerrado') {
+          <rect x="93" y="66" width="14" height="10" rx="2" stroke="white" stroke-width="2" />
+          <path d="M96 66v-4a4 4 0 0 1 8 0v4" stroke="white" stroke-width="2" stroke-linecap="round" />
+        } @else {
+          <path class="entrega-flecha" d="M100 77V59m-7 7 7-7 7 7" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+        }
+      </svg>
+    </div>
+    </ng-template>
     @if (fase() === 'carga') {
-      <app-marco inicio="/entrar">
-        <p class="kicker">Preparando</p>
-        <h1>Un momento</h1>
-      </app-marco>
+      <div class="sala-carga" role="status" aria-label="Cargando la sala">
+        <app-marca variante="carga" />
+      </div>
     }
-    @if (fase() === 'fin' || fase() === 'error') {
-      <app-marco inicio="/entrar">
-        <p class="kicker">Respuesta</p>
-        <h1>{{ fase() === 'fin' ? 'Listo' : 'No se pudo abrir' }}</h1>
-        <p class="lede">{{ finTexto() }}</p>
-        <a class="btn line" routerLink="/entrar" replaceUrl>Volver al acceso</a>
-      </app-marco>
+    @if (fase() === 'instrucciones') {
+      <main class="sala-instrucciones">
+        <app-marca variante="contorno" />
+        <section class="instrucciones-contenido" aria-labelledby="instrucciones-titulo">
+          <h1 id="instrucciones-titulo">Instrucciones de la evaluación</h1>
+          <div class="instrucciones-pestanas" role="tablist" aria-label="Instrucciones" (keydown)="navegarInstrucciones($event)">
+            @for (item of instrucciones; track item.etiqueta; let indice = $index) {
+              <button type="button" role="tab" [id]="'instruccion-' + indice"
+                [attr.aria-selected]="tabInstruccion() === indice"
+                [attr.tabindex]="tabInstruccion() === indice ? 0 : -1"
+                [attr.aria-controls]="'instrucciones-panel-' + indice"
+                [attr.aria-label]="item.etiqueta"
+                (click)="tabInstruccion.set(indice)">
+                <span class="instruccion-punto" aria-hidden="true"></span>
+                <small>{{ item.etiqueta }}</small>
+              </button>
+            }
+          </div>
+          <div class="instrucciones-paneles">
+            @for (item of instrucciones; track item.etiqueta; let indice = $index) {
+              <div class="instrucciones-panel" role="tabpanel" [id]="'instrucciones-panel-' + indice"
+                [attr.aria-labelledby]="'instruccion-' + indice"
+                [attr.inert]="tabInstruccion() === indice ? null : ''"
+                [attr.tabindex]="tabInstruccion() === indice ? 0 : -1">
+                <h2>{{ item.titulo }}</h2>
+                <ul>
+                  @for (punto of item.puntos; track punto) {
+                    <li>
+                      @if (typeof punto === 'string') {
+                        {{ punto }}
+                      } @else {
+                        {{ punto.texto }} <strong>{{ punto.advertencia }}</strong>.
+                      }
+                    </li>
+                  }
+                </ul>
+              </div>
+            }
+          </div>
+          <div class="instrucciones-acciones">
+            <button class="instruccion-flecha btn line" type="button" aria-label="Instrucción anterior"
+              [class.instruccion-flecha-oculta]="tabInstruccion() === 0"
+              [disabled]="tabInstruccion() === 0" (click)="tabInstruccion.set(tabInstruccion() - 1)">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5m6-6-6 6 6 6" /></svg>
+            </button>
+            <button class="instruccion-continuar btn solid" type="button" (click)="avanzarInstruccion()">
+              {{ tabInstruccion() === instrucciones.length - 1 ? 'Continuar a cámara' : 'Continuar' }}
+            </button>
+          </div>
+        </section>
+      </main>
     }
-    @if (fase() === 'camara') {
+    @if (fase() === 'fin' && respuestaEnviada()) {
+      <main class="blanco sala-envio sala-ya-enviada">
+        <div class="centro-blanco">
+          <section class="cierre" aria-labelledby="resultado-titulo">
+            <div class="entrega-video">
+              <ng-container [ngTemplateOutlet]="graficoEntrega" [ngTemplateOutletContext]="{ $implicit: 'completo' }" />
+              <h2 id="resultado-titulo">Respuesta enviada</h2>
+              <p>{{ finTexto() }}</p>
+              <a class="btn line" routerLink="/entrar" replaceUrl>Volver al acceso</a>
+            </div>
+            <ng-container [ngTemplateOutlet]="plazos" />
+          </section>
+        </div>
+      </main>
+    } @else if (fase() === 'fin') {
+      <main class="blanco sala-envio sala-ya-enviada">
+        <div class="centro-blanco">
+          <section class="cierre" aria-labelledby="resultado-titulo">
+            <div class="entrega-video">
+              <ng-container [ngTemplateOutlet]="graficoEntrega" [ngTemplateOutletContext]="{ $implicit: 'cerrado' }" />
+              <h2 id="resultado-titulo">Intento cerrado</h2>
+              <p>{{ finTexto() }}</p>
+              <a class="btn line" routerLink="/entrar" replaceUrl>Volver al acceso</a>
+            </div>
+          </section>
+        </div>
+      </main>
+    } @else if (fase() === 'error') {
+      <app-estado-pagina [codigo]="errorTemporal() ? 503 : undefined"
+        titulo="No se pudo abrir la sala" [mensaje]="finTexto()"
+        [accion]="errorTemporal() ? 'Reintentar' : ''" (actuar)="reintentarSala()" />
+    }
+    @if (fase() === 'camara' && error() && !lista()) {
+      <app-estado-pagina titulo="No se pudo preparar la cámara" [mensaje]="error()"
+        accion="Reintentar" secundaria="Volver a las instrucciones" [mostrarAcceso]="false"
+        (actuar)="reintentarCamara()" (volver)="volverAInstrucciones()" />
+    } @else if (fase() === 'camara') {
       <section class="preparar" [class.encoge]="encogiendo()">
-        <p class="prep-marca"><app-marca />SiVI</p>
+        <button class="volver-instrucciones" type="button" aria-label="Volver a las instrucciones"
+          [disabled]="encogiendo()" (click)="volverAInstrucciones()">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5m6-6-6 6 6 6" /></svg>
+        </button>
+        <p class="prep-marca"><app-marca variante="contorno" /></p>
         <div class="visor-prev">
           <video id="preview" autoplay muted playsinline (loadedmetadata)="ajustarVisor($event)"></video>
         </div>
         @if (error()) {
           <p class="fallo-prep">{{ error() }}</p>
         }
-        <p class="prep-nota">Mírate, elige la cámara y habla un momento para probar el sonido.</p>
+        @if (imagenNegra()) {
+          <ng-container [ngTemplateOutlet]="avisoCamara" />
+        } @else {
+          <p class="prep-nota">Mírate, elige la cámara y habla un momento para probar el sonido.</p>
+        }
         <div class="prep-fila">
           <select class="elige-camara" [value]="camaraId()" (change)="cambiarCamara($event)">
             @if (!camaraId()) {
@@ -45,22 +207,25 @@ type Fase = 'carga' | 'camara' | 'examen' | 'fin' | 'error';
               <option [value]="cam.id">{{ cam.label }}</option>
             }
           </select>
-          <div class="medidor">
-            <div class="voz" id="voz-prev" aria-label="Sonido">
+          <div class="medidor prueba-audio">
+            <div class="voz" id="voz-prev" aria-hidden="true">
               @for (barra of barras; track barra) {
                 <i></i>
               }
             </div>
-            <p class="voz-leyenda">Sonido</p>
+            <p class="voz-leyenda" role="status">
+              {{ audioComprobado() ? 'Micrófono listo' : 'Habla para probar el micrófono' }}
+            </p>
           </div>
         </div>
-        <button class="empezar-prep" type="button" [disabled]="!lista()" (click)="empezar()">Empezar</button>
+        <button class="empezar-prep" type="button" [disabled]="!puedeEmpezar()" (click)="empezar()">Empezar</button>
       </section>
     }
     @if (fase() === 'examen') {
-      <div class="blanco">
+      <div class="blanco" [class.sala-envio]="finalizando() || guardado()">
         <header class="cabecera-blanca">
           @if (!cerrado()) {
+            <div class="sala-medicion">
             <p class="reloj" id="tiempo">{{ tiempo() }}</p>
             <div class="medidor">
               <div class="voz voz-blanca" id="voz-examen" aria-label="Volumen de la voz">
@@ -70,32 +235,38 @@ type Fase = 'carga' | 'camara' | 'examen' | 'fin' | 'error';
               </div>
               <p class="voz-leyenda">Voz</p>
             </div>
+            </div>
+            <div class="pip">
+              <video id="cara" autoplay muted playsinline></video>
+            </div>
           }
         </header>
         <div class="centro-blanco">
           @if (cerrado()) {
             <div class="cierre">
-              <h2>{{ mensaje() }}</h2>
-              @if (errorSubida()) {
-                <p role="alert">{{ errorSubida() }}</p>
-              }
-              @if (finalizando()) {
-                <div class="guardando-grabacion" role="status">
-                  <span class="guardando-indicador" aria-hidden="true"></span>
-                  <strong>¡Espera! No cierres esta ventana.</strong>
-                  <p>Estamos guardando tu grabación.</p>
-                  <ul class="plazos-grabacion">
-                    <li>Una vez enviado el video, el docente tendrá <strong>8 días hábiles</strong> para dar una calificación.</li>
-                    <li>La grabación se eliminará después de <strong>20 días calendario</strong>.</li>
-                  </ul>
+              @if (finalizando() || guardado()) {
+                <div class="entrega-video" role="status">
+                  <ng-container [ngTemplateOutlet]="graficoEntrega" [ngTemplateOutletContext]="{ $implicit: guardado() ? 'completo' : 'guardando' }" />
+                  <h2>{{ guardado() ? 'Listo, tu video quedó guardado' : 'Guardando tu video' }}</h2>
+                  <p>{{ guardado() ? 'Ya puedes cerrar esta ventana.' : '¡Espera! No cierres esta ventana.' }}</p>
+                  @if (finalizando()) { <div class="entrega-pista" aria-hidden="true"><span></span></div> }
                 </div>
-              } @else if (errorSubida() && chunkIndex === 0) {
-                <a class="btn line" routerLink="/entrar" replaceUrl>Volver al acceso</a>
+                <ng-container [ngTemplateOutlet]="plazos" />
               } @else {
-                <p>Ya puedes cerrar esta ventana.</p>
+                <h2>{{ mensaje() }}</h2>
+                @if (errorSubida()) {
+                  <p role="alert">{{ errorSubida() }}</p>
+                }
+                @if (errorSubida() && chunkIndex === 0) {
+                  <a class="btn line" routerLink="/entrar" replaceUrl>Volver al acceso</a>
+                } @else {
+                  <p>Ya puedes cerrar esta ventana.</p>
+                }
               }
             </div>
-          } @else if (pregunta()) {
+          } @else if (imagenNegra()) {
+            <ng-container [ngTemplateOutlet]="avisoCamara" />
+          } @else if (pregunta() && imagenComprobada()) {
             <div class="enunciado" [class.varios]="parrafos().length > 1">
               @for (parrafo of parrafos(); track $index) {
                 <p>{{ parrafo }}</p>
@@ -109,9 +280,6 @@ type Fase = 'carga' | 'camara' | 'examen' | 'fin' | 'error';
           <footer class="pie-blanco">
             <button class="btn terminar" id="terminar" type="button" (click)="terminar('ok')">Terminar y enviar</button>
           </footer>
-          <div class="pip">
-            <video id="cara" autoplay muted playsinline></video>
-          </div>
         }
       </div>
     }
@@ -123,6 +291,14 @@ export class Sala implements OnDestroy {
   private readonly title = inject(Title);
 
   readonly fase = signal<Fase>('carga');
+  readonly imagenNegra = signal(false);
+  readonly imagenComprobada = signal(false);
+  readonly audioComprobado = signal(false);
+  private revisionImagen = 0;
+  readonly errorTemporal = signal(false);
+  readonly instrucciones = INSTRUCCIONES;
+  readonly tabInstruccion = signal(0);
+  readonly respuestaEnviada = signal(false);
   readonly finTexto = signal('');
   readonly error = signal('');
   readonly camaras = signal<{ id: string; label: string }[]>([]);
@@ -135,6 +311,7 @@ export class Sala implements OnDestroy {
   readonly mensaje = signal('');
   readonly errorSubida = signal('');
   readonly finalizando = signal(false);
+  readonly guardado = signal(false);
   readonly barras = BARRAS;
 
   private id = '';
@@ -155,6 +332,7 @@ export class Sala implements OnDestroy {
   private audioStop = () => {};
   private ac = new AbortController();
   private vivo = true;
+  private versionCamara = 0;
   private nombreAlumno = '';
   private muestras = 0;
   private muestrasVoz = 0;
@@ -186,6 +364,8 @@ export class Sala implements OnDestroy {
   }
 
   async empezar() {
+    if (!this.puedeEmpezar()) return;
+    window.clearInterval(this.revisionImagen);
     this.error.set('');
     this.lista.set(false);
     this.exigePantalla = await this.pedirPantalla();
@@ -205,10 +385,15 @@ export class Sala implements OnDestroy {
     window.setTimeout(() => this.comenzarGrabacion(), 40);
   }
 
+  puedeEmpezar() {
+    return this.lista() && this.imagenComprobada() && !this.imagenNegra() && this.audioComprobado();
+  }
+
   async terminar(tipo: string) {
     if (this.finEnCurso) return;
     if (this.muestras >= 45 && this.muestrasVoz / this.muestras < 0.06) this.avisar('silencio');
     this.finEnCurso = true;
+    window.clearInterval(this.revisionImagen);
     this.finalizando.set(true);
     this.preguntaVisible = false;
     window.clearInterval(this.timer);
@@ -221,7 +406,7 @@ export class Sala implements OnDestroy {
     if (document.fullscreenElement) {
       void document.exitFullscreen().catch(() => undefined);
     }
-    if (tipo !== 'ok' && tipo !== 'tiempo') {
+    if (!['ok', 'tiempo', 'supervision'].includes(tipo)) {
       await this.api
         .request('/api/intentos/' + this.id + '/marca', { method: 'POST', body: { tipo } })
         .catch(() => undefined);
@@ -249,7 +434,8 @@ export class Sala implements OnDestroy {
 
   private async cerrarIntento() {
     try {
-      await this.api.request('/api/intentos/' + this.id + '/cerrar', { method: 'POST', body: {} });
+      const resultado = await this.api.request<{ estado: string }>('/api/intentos/' + this.id + '/cerrar', { method: 'POST', body: {} });
+      this.guardado.set(resultado.estado === 'completo' && !this.errorSubida() && this.chunkIndex > 0);
     } catch {
       if (!this.errorSubida()) this.errorSubida.set('No se pudo confirmar el cierre de la grabación.');
     } finally {
@@ -289,16 +475,24 @@ export class Sala implements OnDestroy {
   private async abrir() {
     const id = sessionStorage.getItem('encuadro.intento');
     if (!id) {
-      await this.router.navigateByUrl('/entrar', { replaceUrl: true });
+      this.finTexto.set('Ingresa tu código de examen desde el formulario de acceso.');
+      this.fase.set('error');
       return;
     }
     this.id = id;
     let sala: SalaDto;
     try {
-      sala = await this.api.request<SalaDto>('/api/intentos/' + id + '/sala');
+      const duracion = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 1100;
+      [sala] = await Promise.all([
+        this.api.request<SalaDto>('/api/intentos/' + id + '/sala'),
+        esperar(duracion),
+      ]);
     } catch (error) {
-      sessionStorage.removeItem('encuadro.intento');
-      this.finTexto.set(error instanceof Error ? error.message : 'No se pudo abrir');
+      const temporal = servicioNoDisponible(error);
+      if (!temporal) sessionStorage.removeItem('encuadro.intento');
+      this.errorTemporal.set(temporal);
+      this.finTexto.set(temporal ? 'Revisa tu conexión e intenta cargar la sala otra vez.'
+        : error instanceof Error ? error.message : 'Vuelve al acceso y revisa el código.');
       this.fase.set('error');
       return;
     }
@@ -306,9 +500,7 @@ export class Sala implements OnDestroy {
     if (sala.estado === 'esperando') {
       this.nombreAlumno = sala.nombre;
       document.body.classList.add('fondo-blanco');
-      this.fase.set('camara');
-      await esperar(40);
-      await this.abrirCamara();
+      this.fase.set('instrucciones');
       return;
     }
     if (sala.estado === 'grabando') {
@@ -316,44 +508,120 @@ export class Sala implements OnDestroy {
         .request('/api/intentos/' + id + '/marca', { method: 'POST', body: { tipo: 'hueco' } })
         .catch(() => undefined);
       await this.api.request('/api/intentos/' + id + '/cerrar', { method: 'POST', body: {} }).catch(() => undefined);
-      this.finTexto.set('La grabación se interrumpió al recargar. El profesor ve el intento incompleto.');
+      this.finTexto.set('La grabación se interrumpió al recargar. Para volver a intentarlo con el mismo nombre y código, pídele al profesor que elimine el intento.');
       this.fase.set('fin');
       return;
     }
     if (sala.estado === 'completo') {
-      this.finTexto.set('Este nombre ya envió la respuesta. Ya puedes cerrar la ventana.');
+      this.respuestaEnviada.set(true);
+      this.finTexto.set('La respuesta ya se entregó. Puedes cerrar esta ventana.');
     } else if (sala.estado === 'sospechoso') {
-      this.finTexto.set('Este intento quedó marcado. No se puede volver a abrir la pregunta.');
+      this.finTexto.set('Este intento quedó marcado y la pregunta se cerró. Pídele al profesor que elimine el intento. Después podrás entrar con el mismo nombre y código.');
     } else if (sala.trozos === 0) {
       this.finTexto.set('No se guardó ninguna grabación. Vuelve al acceso e inténtalo con el mismo nombre y código.');
     } else {
-      this.finTexto.set('El intento quedó incompleto. La parte guardada está disponible para el profesor.');
+      this.finTexto.set('El intento quedó incompleto. Si necesitas repetirlo, pídele al profesor que lo elimine. Después podrás entrar con el mismo nombre y código.');
     }
     this.fase.set('fin');
   }
 
+  reintentarSala() {
+    this.errorTemporal.set(false);
+    this.fase.set('carga');
+    void this.abrir();
+  }
+
+  cambiarInstruccion(indice: number) {
+    this.tabInstruccion.set(indice);
+    document.getElementById('instruccion-' + indice)?.focus();
+  }
+
+  avanzarInstruccion() {
+    if (this.tabInstruccion() === this.instrucciones.length - 1) {
+      void this.continuarACamara();
+      return;
+    }
+    this.tabInstruccion.update(indice => indice + 1);
+  }
+
+  navegarInstrucciones(event: KeyboardEvent) {
+    const actual = this.tabInstruccion();
+    const total = this.instrucciones.length;
+    const destinos: Record<string, number> = {
+      ArrowLeft: (actual + total - 1) % total,
+      ArrowRight: (actual + 1) % total,
+      Home: 0,
+      End: total - 1,
+    };
+    if (!Object.hasOwn(destinos, event.key)) return;
+    event.preventDefault();
+    this.cambiarInstruccion(destinos[event.key]);
+  }
+
+  async continuarACamara() {
+    if (this.fase() !== 'instrucciones') return;
+    const version = this.versionCamara;
+    this.imagenComprobada.set(false);
+    this.imagenNegra.set(false);
+    this.audioComprobado.set(false);
+    this.fase.set('camara');
+    await esperar(40);
+    if (this.vivo && this.fase() === 'camara' && version === this.versionCamara) await this.abrirCamara();
+  }
+
+  volverAInstrucciones() {
+    if (this.fase() !== 'camara' || this.encogiendo()) return;
+    this.versionCamara += 1;
+    window.clearInterval(this.revisionImagen);
+    this.audioStop();
+    this.stream?.getTracks().forEach(track => track.stop());
+    this.stream = null;
+    this.lista.set(false);
+    this.error.set('');
+    this.fase.set('instrucciones');
+  }
+
+  async reintentarCamara() {
+    if (this.fase() !== 'camara' || !this.error()) return;
+    window.clearInterval(this.revisionImagen);
+    this.audioStop();
+    this.stream?.getTracks().forEach(track => track.stop());
+    this.stream = null;
+    this.error.set('');
+    this.audioComprobado.set(false);
+    await esperar(40);
+    if (this.vivo && this.fase() === 'camara') await this.abrirCamara();
+  }
+
   private async abrirCamara() {
+    const version = ++this.versionCamara;
+    const vigente = () => this.vivo && this.fase() === 'camara' && version === this.versionCamara;
+    let stream: MediaStream;
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         audio: this.opcionesAudio(),
         video: this.opcionesVideo(),
       });
     } catch (error) {
-      this.error.set(mensajeMedia(error as { name?: string }));
+      if (vigente()) this.error.set(mensajeMedia(error as { name?: string }));
       return;
     }
-    if (!this.vivo || this.fase() !== 'camara') {
-      this.stream.getTracks().forEach((track) => track.stop());
-      this.stream = null;
+    if (!vigente()) {
+      stream.getTracks().forEach((track) => track.stop());
       return;
     }
-    const track = this.stream.getVideoTracks()[0];
+    this.stream = stream;
+    const track = stream.getVideoTracks()[0];
     const label = track?.label ?? '';
     const video = document.getElementById('preview') as HTMLVideoElement | null;
-    if (video) this.ponerVideo(video, this.stream);
+    if (video) {
+      this.ponerVideo(video, stream);
+      this.revisarImagenCamara(video);
+    }
     await this.listarCamaras(track?.getSettings().deviceId || '');
+    if (!vigente()) return;
     const medidor = document.getElementById('voz-prev');
-    if (medidor) this.medir(this.stream, medidor);
+    if (medidor) this.medir(stream, medidor, true);
     if (esVirtual(label)) {
       await this.api
         .request('/api/intentos/' + this.id + '/marca', {
@@ -361,12 +629,14 @@ export class Sala implements OnDestroy {
           body: { tipo: 'virtual', detalle: label },
         })
         .catch(() => undefined);
-      this.error.set('Esta cámara parece virtual (' + label + '). Usa la cámara de la computadora.');
-      this.stream.getTracks().forEach((item) => item.stop());
-      this.stream = null;
+      stream.getTracks().forEach((item) => item.stop());
+      if (vigente()) {
+        this.error.set('Esta cámara parece virtual (' + label + '). Usa la cámara de la computadora.');
+        this.stream = null;
+      }
       return;
     }
-    if (!this.stream.getAudioTracks().length) {
+    if (!stream.getAudioTracks().length) {
       this.error.set('Hace falta micrófono, porque la respuesta es en voz.');
       return;
     }
@@ -394,6 +664,10 @@ export class Sala implements OnDestroy {
         audio: false,
         video: this.opcionesVideo(id),
       });
+      if (this.fase() !== 'camara' || this.stream !== stream) {
+        pedido.getTracks().forEach(track => track.stop());
+        return;
+      }
       const track = pedido.getVideoTracks()[0];
       const label = track?.label ?? '';
       if (!track || esVirtual(label)) {
@@ -407,11 +681,15 @@ export class Sala implements OnDestroy {
       const nuevo = new MediaStream([...audio, track]);
       this.stream = nuevo;
       const video = document.getElementById('preview') as HTMLVideoElement | null;
-      if (video) this.ponerVideo(video, nuevo);
+      if (video) {
+        this.ponerVideo(video, nuevo);
+        this.revisarImagenCamara(video);
+      }
       viejos.forEach((item) => item.stop());
       this.camaraId.set(id);
       this.error.set('');
     } catch (error) {
+      if (this.fase() !== 'camara' || this.stream !== stream) return;
       volver();
       this.error.set(mensajeMedia(error as { name?: string }));
     }
@@ -433,7 +711,10 @@ export class Sala implements OnDestroy {
     const stream = this.stream;
     if (!stream || !this.vivo) return;
     const cara = document.getElementById('cara') as HTMLVideoElement | null;
-    if (cara) this.ponerVideo(cara, stream);
+    if (cara) {
+      this.ponerVideo(cara, stream);
+      this.revisarImagenCamara(cara);
+    }
     const medidor = document.getElementById('voz-examen');
     if (medidor) this.medir(stream, medidor);
     this.ac.abort();
@@ -655,6 +936,12 @@ export class Sala implements OnDestroy {
           return;
         } catch (error) {
           fallo = error;
+          if (error instanceof Error && error.message === 'El intento se cerró por un aviso de supervisión.') {
+            this.errorSubida.set('La supervisión marcó este intento. Si necesitas repetirlo, comunícate con tu profesor.');
+            if (!this.finEnCurso) await this.terminar('supervision');
+            else this.mensaje.set('Intento cerrado');
+            return;
+          }
           if (intento < 2) await esperar(500 * (intento + 1));
         }
       }
@@ -829,13 +1116,48 @@ export class Sala implements OnDestroy {
     if (this.negro >= 3 || this.quieto >= 4) this.avisar('imagen');
   }
 
+  private revisarImagenCamara(video: HTMLVideoElement) {
+    window.clearInterval(this.revisionImagen);
+    this.imagenComprobada.set(false);
+    this.imagenNegra.set(false);
+    const muestra = document.createElement('canvas');
+    muestra.width = 32;
+    muestra.height = 24;
+    const ctx = muestra.getContext('2d', { willReadFrequently: true });
+    if (!ctx) {
+      this.imagenComprobada.set(true);
+      return;
+    }
+    let oscuras = 0;
+    let claras = 0;
+    this.revisionImagen = window.setInterval(() => {
+      if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth) return;
+      ctx.drawImage(video, 0, 0, muestra.width, muestra.height);
+      const { data } = ctx.getImageData(0, 0, muestra.width, muestra.height);
+      let pixelesOscuros = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i]! * .3 + data[i + 1]! * .59 + data[i + 2]! * .11 < 18) pixelesOscuros++;
+      }
+      const oscura = pixelesOscuros >= muestra.width * muestra.height * .97;
+      oscuras = oscura ? oscuras + 1 : 0;
+      claras = oscura ? 0 : claras + 1;
+      if (oscuras >= 2) {
+        this.imagenNegra.set(true);
+        if (this.preguntaVisible) this.avisar('imagen');
+      } else if (claras >= 2) {
+        this.imagenComprobada.set(true);
+        this.imagenNegra.set(false);
+      }
+    }, 350);
+  }
+
   private ponerVideo(video: HTMLVideoElement, stream: MediaStream) {
     video.muted = true;
     video.volume = 0;
     video.srcObject = stream;
   }
 
-  private medir(stream: MediaStream, root: HTMLElement) {
+  private medir(stream: MediaStream, root: HTMLElement, prueba = false) {
     this.audioStop();
     const Ctx = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!Ctx) return;
@@ -849,6 +1171,7 @@ export class Sala implements OnDestroy {
     const bars = Array.from(root.querySelectorAll('i'));
     const fill = root.querySelector('.sonido-fill') as HTMLElement | null;
     let smooth = 0;
+    let vozDesde: number | null = null;
     const loop = () => {
       analyser.getByteTimeDomainData(data);
       let sum = 0;
@@ -858,6 +1181,11 @@ export class Sala implements OnDestroy {
       }
       const target = Math.min(1, Math.sqrt(sum / data.length) * 7);
       smooth += (target - smooth) * 0.28;
+      if (prueba && !this.audioComprobado()) {
+        const ahora = performance.now();
+        vozDesde = smooth >= 0.12 ? vozDesde ?? ahora : null;
+        if (vozDesde !== null && ahora - vozDesde >= 350) this.audioComprobado.set(true);
+      }
       if (this.preguntaVisible) {
         this.muestras += 1;
         if (smooth > 0.12) this.muestrasVoz += 1;
@@ -883,6 +1211,7 @@ export class Sala implements OnDestroy {
   }
 
   private limpiar() {
+    window.clearInterval(this.revisionImagen);
     this.ac.abort();
     window.clearInterval(this.timer);
     window.clearInterval(this.pollSala);

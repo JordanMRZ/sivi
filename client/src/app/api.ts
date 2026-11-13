@@ -34,6 +34,7 @@ export interface Intento {
   minutos: number;
   dispositivo: string;
   creado: number;
+  enviado?: number;
   revision: string;
   segundos: number;
 }
@@ -43,11 +44,13 @@ export interface Examen {
   pregunta: string;
   minutos: number;
   creado: number;
+  vence?: number;
   ahora?: number;
   intentos: Intento[];
 }
 
 export interface Panel {
+  vencimientoCodigos?: boolean;
   nombre: string;
   usuario: string;
   ahora: number;
@@ -64,6 +67,18 @@ export interface SalaDto {
   trozos: number;
   ahora: number;
   pregunta: string | null;
+}
+
+export class ErrorApi extends Error {
+  constructor(mensaje: string, readonly estado: number) {
+    super(mensaje);
+  }
+}
+
+export function servicioNoDisponible(error: unknown) {
+  return (error instanceof ErrorApi && error.estado >= 500) ||
+    error instanceof TypeError || error instanceof SyntaxError ||
+    (error instanceof DOMException && error.name === 'TimeoutError');
 }
 
 export interface TrozoDto {
@@ -84,18 +99,19 @@ export class Api {
   private async urlWeb(): Promise<string> {
     if (this.endpoint) return this.endpoint;
     const respuesta = await fetch("/sivi-config.json");
-    if (!respuesta.ok) throw new Error("Falta configurar la API de SiVI.");
+    if (!respuesta.ok) throw new ErrorApi('No se pudo conectar con SiVI.', 503);
     const configuracion = await respuesta.json();
     const url = new URL(configuracion.api);
     if (url.origin !== "https://script.google.com" || !url.pathname.endsWith("/exec")) {
-      throw new Error("La URL de Apps Script no es válida.");
+      throw new ErrorApi('No se pudo conectar con SiVI.', 503);
     }
     return this.endpoint = url.href;
   }
   readonly enWeb = location.hostname.endsWith('.web.app') || location.hostname.endsWith('.firebaseapp.com');
 
   private async llamadaWeb<T>(ruta: string, metodo: string, datos: unknown, signal?: AbortSignal): Promise<T> {
-    const token = sessionStorage.getItem(SESION_WEB) || '';
+    const rutaDocente = ruta.startsWith('/api/profesor') || ruta === '/api/salir' || /\/video(?:\/|$)/.test(ruta);
+    const token = rutaDocente ? sessionStorage.getItem(SESION_WEB) || '' : '';
     const respuesta = await fetch(await this.urlWeb(), {
       method: 'POST',
       credentials: 'omit',
@@ -103,9 +119,13 @@ export class Api {
       body: JSON.stringify({ accion: 'api', ruta, metodo, datos, token }),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(45000)]) : undefined,
     });
-    if (!respuesta.ok) throw new Error('No se pudo conectar con SiVI.');
+    if (!respuesta.ok) throw new ErrorApi('No se pudo conectar con SiVI.', respuesta.status);
     const resultado = await respuesta.json();
-    if (!resultado.ok) throw new Error(resultado.error || 'No se pudo completar la operación.');
+    if (!resultado.ok) {
+      const mensaje = resultado.error || 'No se pudo completar la operación.';
+      if (mensaje === 'No se pudo completar la operación.') throw new ErrorApi(mensaje, 503);
+      throw new Error(mensaje);
+    }
     return resultado.datos as T;
   }
 
@@ -211,7 +231,7 @@ export class Api {
       }
     }
     if (!response.ok) {
-      throw new Error(String(data['error'] ?? 'No se pudo completar'));
+      throw new ErrorApi(String(data['error'] ?? 'No se pudo completar'), response.status);
     }
     if (typeof data['ahora'] === 'number') {
       this.offset = data['ahora'] - Date.now() / 1000;

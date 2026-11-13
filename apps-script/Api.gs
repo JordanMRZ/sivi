@@ -3,6 +3,56 @@ const AVIA_LOTE_VIDEO = 4;
 const AVIA_MARGEN_CIERRE = 120;
 const AVIA_MARGEN_SUBIDA = 60;
 const AVIA_RETENCION_VIDEO = 20 * 86400;
+const AVIA_SESION_SEGUNDOS = 8 * 3600;
+
+// Se llama bajo el bloqueo del script para que dos peticiones no compartan el mismo cupo.
+function aviaConsumirCuota(reglas) {
+  const cache = CacheService.getScriptCache();
+  const ahora = Math.floor(Date.now() / 1000);
+  const contadores = reglas.map(([ambito, limite, ventana]) => {
+    const bloque = Math.floor(ahora / ventana);
+    const clave = 'cuota:' + ambito + ':' + bloque;
+    const usos = Number(cache.get(clave) || 0);
+    if (usos >= limite) aviaFallar('Demasiadas solicitudes. Espera unos minutos antes de intentarlo de nuevo.');
+    return { clave, usos, ttl: (bloque + 1) * ventana - ahora };
+  });
+  for (const { clave, usos, ttl } of contadores) cache.put(clave, String(usos + 1), ttl);
+}
+
+function aviaCuotaAutenticacion(ruta, usuario) {
+  const alta = ruta === '/api/cuentas';
+  const correo = String(usuario || '').trim().toLowerCase().slice(0, 254);
+  const huella = Utilities.base64EncodeWebSafe(
+    Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, correo)
+  );
+  const lock = LockService.getScriptLock();
+  lock.waitLock(5000);
+  try {
+    aviaConsumirCuota(alta
+      ? [['altas', 20, 3600], ['alta:' + huella, 3, 3600]]
+      : [['accesos', 180, 300], ['acceso:' + huella, 8, 900]]);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function revocarSesionesDocentes() {
+  if (Session.getEffectiveUser().getEmail().toLowerCase() !== aviaCuentaPropietaria()) {
+    throw new Error('Solo el propietario puede revocar las sesiones docentes.');
+  }
+  const id = PropertiesService.getScriptProperties().getProperty('AVIA_ESTADO');
+  if (!id) throw new Error('La API todavía no está configurada.');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const archivo = DriveApp.getFileById(id);
+    const db = JSON.parse(archivo.getBlob().getDataAsString('UTF-8'));
+    db.sesiones = {};
+    archivo.setContent(JSON.stringify(db));
+  } finally {
+    lock.releaseLock();
+  }
+}
 const AVIA_GRAVES = ['tab', 'camara', 'fullscreen', 'virtual', 'hueco'];
 const AVIA_MARCAS = [...AVIA_GRAVES, 'segunda_pantalla', 'copiar', 'pegar', 'menu', 'silencio', 'imagen'];
 
@@ -97,6 +147,7 @@ function aviaIdentidad(ruta, datos) {
   const nombre = alta ? aviaTexto(datos.nombre, 2, 60, 'Escribe tu nombre.') : '';
   const claveFirebase = PropertiesService.getScriptProperties().getProperty("SIVI_FIREBASE_KEY");
   if (!claveFirebase) aviaFallar("La autenticación de SiVI todavía no está configurada.");
+  aviaCuotaAutenticacion(ruta, email);
   const accion = alta ? 'signUp' : 'signInWithPassword';
   const respuesta = UrlFetchApp.fetch(
     'https://identitytoolkit.googleapis.com/v1/accounts:' + accion + '?key=' + encodeURIComponent(claveFirebase),
@@ -133,10 +184,11 @@ function aviaEvaluar(intento, ahora) {
 }
 
 function aviaFicha(intento, ahora) {
-  const { archivos, carpeta, nombreKey, ultimoTrozo, codigo, contenedor, cerrado, enviado, ...ficha } = intento;
+  const { archivos, carpeta, nombreKey, ultimoTrozo, codigo, contenedor, cerrado, enviado, autorizacion, ...ficha } = intento;
   const videoEliminado = Boolean(intento.videoEliminado || (archivos.length && aviaVideoVencido(intento, ahora)));
   return {
     ...ficha,
+    ...(enviado ? { enviado } : {}),
     videoEliminado,
     trozos: videoEliminado ? 0 : archivos.length,
     segundos: Math.max(0, Math.round((ultimoTrozo || 0) - (intento.inicio || 0))),
@@ -167,6 +219,7 @@ function aviaApi(solicitud) {
   lock.waitLock(15000);
   let lectura;
   try {
+    if (ruta === '/api/intentos' && metodo === 'POST') aviaConsumirCuota([['entradas', 150, 300]]);
     const archivo = DriveApp.getFileById(estadoId);
     const db = JSON.parse(archivo.getBlob().getDataAsString('UTF-8'));
     const ahora = Date.now() / 1000;
@@ -184,10 +237,10 @@ function aviaApi(solicitud) {
         db.profesores[identidad.id] = profesor;
       }
       for (const [token, sesion] of Object.entries(db.sesiones)) {
-        if (sesion.vence <= ahora) delete db.sesiones[token];
+        if (!sesion.creada || sesion.vence <= ahora) delete db.sesiones[token];
       }
       const token = aviaToken();
-      db.sesiones[token] = { id: identidad.id, vence: ahora + 30 * 86400 };
+      db.sesiones[token] = { id: identidad.id, creada: ahora, vence: ahora + AVIA_SESION_SEGUNDOS };
       return guardar({ token, ...profesor });
     }
     const token = String(solicitud.token || '');
@@ -199,7 +252,7 @@ function aviaApi(solicitud) {
       }
       return { ok: true };
     }
-    const profesorId = sesion && sesion.vence > ahora ? sesion.id : null;
+    const profesorId = sesion && sesion.creada && sesion.vence > ahora ? sesion.id : null;
     if (partes[0] === 'profesor') {
       if (!profesorId) aviaFallar('Entra con tu cuenta.');
       if (ruta === '/api/profesor' && metodo === 'GET') {
@@ -212,18 +265,26 @@ function aviaApi(solicitud) {
               .sort((a, b) => (b.inicio || b.creado) - (a.inicio || a.creado))
               .map(i => { aviaEvaluar(i, ahora); return aviaFicha(i, ahora); }),
           }));
-        return { ...db.profesores[profesorId], ahora, examenes };
+        return { ...db.profesores[profesorId], ahora, examenes, vencimientoCodigos: true };
       }
       if (partes[1] === 'examenes') {
         if (ruta === '/api/profesor/examenes' && metodo === 'POST') {
           const pregunta = aviaTexto(datos.pregunta, 4, 2000, 'Escribe la pregunta.');
           const minutos = Number(datos.minutos ?? 5);
           if (!Number.isInteger(minutos) || minutos < 0 || minutos > 30) aviaFallar('Minutos inválidos.');
+          const horas = datos.vigenciaHoras;
+          if (horas != null && (!Number.isInteger(horas) || horas < 1 || horas > 8760)) {
+            aviaFallar('La vigencia debe ser de 1 a 8760 horas.');
+          }
+          aviaConsumirCuota([['preguntas:' + profesorId, 30, 3600]]);
           let codigo;
           do {
             codigo = Array.from({ length: 8 }, () => AVIA_CODIGOS[Math.floor(Math.random() * AVIA_CODIGOS.length)]).join('');
           } while (db.examenes[codigo]);
-          db.examenes[codigo] = { codigo, pregunta, minutos, profesorId, creado: ahora };
+          db.examenes[codigo] = {
+            codigo, pregunta, minutos, profesorId, creado: ahora,
+            ...(horas == null ? {} : { vence: ahora + horas * 3600 }),
+          };
           return guardar({ codigo, minutos });
         }
         const examen = db.examenes[String(partes[2] || '').toUpperCase()];
@@ -257,10 +318,14 @@ function aviaApi(solicitud) {
       }
     }
     if (ruta === '/api/intentos' && metodo === 'POST') {
+      if (datos.autorizacion !== 'sivi-evaluacion-v1') {
+        aviaFallar('Autoriza el tratamiento de datos para continuar.');
+      }
       const codigo = String(datos.codigo || '').trim().toUpperCase();
       const nombre = aviaTexto(datos.nombre, 2, 60, 'Escribe tu nombre.');
       const examen = db.examenes[codigo];
       if (!examen || !/^[A-Z0-9]{8}$/.test(codigo)) aviaFallar('Ese código no existe.');
+      if (examen.vence && ahora >= examen.vence) aviaFallar('Este código ya venció.');
       const contexto = {};
       if (['profesor', 'semestre', 'materia'].some(campo => campo in datos)) {
         contexto.profesor = aviaTexto(datos.profesor, 2, 100, 'Escribe el nombre del profesor.');
@@ -274,15 +339,18 @@ function aviaApi(solicitud) {
       );
       if (intento) {
         const respuesta = { id: intento.id, estado: intento.estado, nombre, minutos: intento.minutos, ahora };
-        if (intento.estado === 'esperando' && !intento.profesor && contexto.profesor) {
-          Object.assign(intento, contexto);
+        if (intento.estado === 'esperando' && !intento.autorizacion) {
+          if (!intento.profesor && contexto.profesor) Object.assign(intento, contexto);
+          intento.autorizacion = { version: datos.autorizacion, fecha: ahora };
           return guardar(respuesta);
         }
         return respuesta;
       }
       const id = aviaToken();
+      aviaConsumirCuota([['intentos:' + codigo, 45, 600]]);
       intento = {
         id, codigo, nombre, nombreKey, minutos: examen.minutos, estado: 'esperando',
+        autorizacion: { version: datos.autorizacion, fecha: ahora },
         ...contexto,
         marcas: [], archivos: [], inicio: null, ultimoTrozo: null,
         dispositivo: '', creado: ahora, revision: 'nueva',

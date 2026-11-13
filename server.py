@@ -202,6 +202,7 @@ def publico_intento(intento):
     return {
         "id": intento["id"],
         "nombre": intento["nombre"],
+        "enviado": intento.get("enviado"),
         "profesor": intento.get("profesor", ""),
         "semestre": intento.get("semestre", ""),
         "materia": intento.get("materia", ""),
@@ -371,6 +372,7 @@ def ficha_examen(db, examen, momento):
         "pregunta": examen["pregunta"],
         "minutos": examen["minutos"],
         "creado": examen["creado"],
+        "vence": examen.get("vence"),
         "intentos": intentos,
     }, cambio
 
@@ -394,12 +396,16 @@ def panel_profesor(profesor):
         "usuario": profesor["usuario"],
         "ahora": momento,
         "examenes": examenes,
+        "vencimientoCodigos": True,
     }
 
 
 def crear_examen(profesor, body):
     pregunta = pregunta_valida(body.get("pregunta"))
     minutos = minutos_validos(body.get("minutos"))
+    horas = body.get("vigenciaHoras")
+    if horas is not None and (type(horas) is not int or not 1 <= horas <= 8760):
+        raise ApiError(400, "La vigencia debe ser de 1 a 8760 horas")
     db = load_db()
     examen = {
         "codigo": nuevo_codigo(db),
@@ -408,6 +414,8 @@ def crear_examen(profesor, body):
         "minutos": minutos,
         "creado": now(),
     }
+    if horas is not None:
+        examen["vence"] = examen["creado"] + horas * 3600
     db["examenes"].append(examen)
     save_db(db)
     return {"codigo": examen["codigo"], "minutos": minutos}
@@ -454,6 +462,8 @@ def borrar_examen(profesor, codigo):
 
 
 def abrir_intento(body):
+    if body.get("autorizacion") != "sivi-evaluacion-v1":
+        raise ApiError(400, "Autoriza el tratamiento de datos para continuar.")
     codigo = clean_text(body.get("codigo"), 8, 8, "El código tiene 8 caracteres").upper()
     if any(char not in CODE_ALPHABET for char in codigo):
         raise ApiError(400, "Ese código no existe")
@@ -470,12 +480,16 @@ def abrir_intento(body):
     examen = buscar_examen(db, codigo=codigo)
     if not examen:
         raise ApiError(404, "Ese código no existe")
+    if examen.get("vence") and now() >= examen["vence"]:
+        raise ApiError(400, "Este código ya venció")
     for intento in db["intentos"]:
         if intento["codigo"] == examen["codigo"] and intento["nombreKey"] == clave_nombre:
             if intento["estado"] == "incompleto" and not intento["trozos"]:
                 continue
-            if intento["estado"] == "esperando" and not intento.get("profesor") and contexto:
-                intento.update(contexto)
+            if intento["estado"] == "esperando" and not intento.get("autorizacion"):
+                if not intento.get("profesor"):
+                    intento.update(contexto)
+                intento["autorizacion"] = {"version": body["autorizacion"], "fecha": now()}
                 save_db(db)
             return {
                 "id": intento["id"],
@@ -489,6 +503,7 @@ def abrir_intento(body):
         "codigo": examen["codigo"],
         "nombre": nombre,
         "nombreKey": clave_nombre,
+        "autorizacion": {"version": body["autorizacion"], "fecha": now()},
         **contexto,
         "minutos": examen["minutos"],
         "estado": "esperando",
@@ -623,6 +638,8 @@ def cerrar(intento_id):
         intento["estado"] = "completo" if intento["trozos"] else "incompleto"
     elif intento["estado"] == "esperando":
         intento["estado"] = "incompleto"
+    if intento["trozos"] and not intento.get("enviado"):
+        intento["enviado"] = momento
     save_db(db)
     return {"ok": True, "estado": intento["estado"]}
 
@@ -1062,7 +1079,7 @@ class Handler(BaseHTTPRequestHandler):
         clean = path.split("?")[0]
         if len(clean) > 1 and clean.endswith("/"):
             clean = clean[:-1]
-        if clean in ("", "/", "/profesor", "/profesor/nueva", "/entrar", "/sala"):
+        if clean in ("", "/", "/docentes-sivi-7q4m9x2k", "/profesor", "/profesor/nueva", "/entrar", "/sala"):
             return True
         parts = [part for part in clean.split("/") if part]
         return len(parts) == 3 and parts[0] == "profesor" and parts[1] == "p" and len(parts[2]) == 8
